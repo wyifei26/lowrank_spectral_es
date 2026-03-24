@@ -1,0 +1,79 @@
+seed: 42
+algorithm:
+  name: spectral_es
+model:
+  model_path: /GenSIvePFS/users/model/Qwen/Qwen3-0.6B-Base
+  dtype: bfloat16
+  svd_dtype: float32
+data:
+  source: mmlu_pro
+  cache_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_raw
+  processed_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_processed
+  raw_splits: [validation, test]
+  split_seed: 42
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  val_size: 0
+  train_max_examples: 0
+  val_max_examples: 0
+  test_max_examples: 0
+prompt:
+  template_name: mmlu_pro_boxed_choice_v1
+  require_box_answer: true
+  use_chat_template: true
+generation:
+  max_new_tokens: 1024
+  temperature: 0.0
+layers:
+  target_blocks: all-blocks
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+subspace:
+  rank: 32
+  band_strategy: top-band
+  cache_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/svd_cache
+es:
+  num_mutants: 64
+  update_rule: pairwise_directional
+  antithetic: true
+  sigma:
+    m: 0.01
+  alpha:
+    m: 0.005
+reward:
+  exact_match: 1.0
+train:
+  train_steps: 500
+  effective_question_batch: 32
+  micro_batch: 32
+eval:
+  micro_batch: 128
+  eval_every_steps: 5
+  skip_initial_validation: true
+execution:
+  backend: vllm
+  distributed_mode: mutant_parallel
+  world_size: null
+  gpus_per_node: null
+  mutants_per_worker: null
+  mutant_chunk_size: 16
+vllm:
+  max_cpu_loras: 16
+  gpu_memory_utilization: 0.85
+  max_model_len: 4096
+  enforce_eager: true
+output:
+  root_dir: /GenSIvePFS/users/yfwang/output/lowrank_spectral_es_rl
+  run_id: spectral_es_vllm_mutant_parallel_mmlu_pro_r32_k64_q32_mb32
+wandb:
+  enabled: true
+  project: lowrank-spectral-es-rl
+  entity: null
+  group: spectral_es_vllm_mutant_parallel
+  job_type: train
+  name: null
+  dir: /GenSIvePFS/users/yfwang/output/wandb
+  mode: online
+  tags: [mmlu_pro, qwen3_0p6b, spectral_es, vllm, mutant_parallel]
+baseline:
+  output_dir: /GenSIvePFS/users/yfwang/output/mmlu_pro_eval
