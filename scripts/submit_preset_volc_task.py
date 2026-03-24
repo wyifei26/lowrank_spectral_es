@@ -6,6 +6,7 @@ from volc_task_presets import (
     DATASET_PRESETS,
     MODEL_PRESETS,
     PARAM_PRESETS,
+    SAMPLING_PRESETS,
     TaskSelection,
     preview_submission,
     submit_config,
@@ -13,11 +14,12 @@ from volc_task_presets import (
 )
 
 
-# Edit these four values before running the script.
-DATASET_KEY = "mmlu_pro"
-MODEL_KEY = "qwen3_8b"
+# Edit these five values before running the script.
+DATASET_KEY = "gsm8k"
+MODEL_KEY = "qwen3_0p6b_nothink"
 PARAM_KEY = "default"
-GPU_COUNT = 8
+SAMPLING_KEY = "cms"
+GPU_COUNT = 4
 
 # Optional knobs for the generated task.
 WANDB_GROUP = "spectral_es_manual"
@@ -28,6 +30,7 @@ def main() -> None:
         dataset=DATASET_PRESETS[DATASET_KEY],
         model=MODEL_PRESETS[MODEL_KEY],
         params=PARAM_PRESETS[PARAM_KEY],
+        sampling=SAMPLING_PRESETS[SAMPLING_KEY],
         gpu_count=GPU_COUNT,
         wandb_group=WANDB_GROUP,
     )

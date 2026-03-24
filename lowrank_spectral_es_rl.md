@@ -9,7 +9,7 @@
 - 算法：`spectral_es`
 - 推理后端：`vLLM`
 - 并行方式：`single-node multi-GPU mutant-parallel`
-- 更新规则：`pairwise directional` 或 `gaussian_mean`
+- 更新规则：`pairwise directional`、`gaussian_mean` 或 `per_layer_cma_es`
 - 约束：`standard alpha-over-sigma ES step + per-layer trust region`
 - 任务：`GSM8K`、`math_data`、`MMLU-Pro`
 - reward：
@@ -140,9 +140,17 @@ $$
 
 由于当前解码默认是 greedy，并且 `temperature=0.0`，所以在当前主线配置下，随机性主要来自参数扰动而不是采样解码。
 
-## 4. Pairwise Spectral ES 的数学推导
+## 4. 当前实现的三种采样 / 更新机制
 
-### 4.1 平滑目标
+当前代码里真正接通训练主线的采样 / 更新机制有三种：
+
+1. `pairwise_directional`
+2. `gaussian_mean`
+3. `per_layer_cma_es`
+
+它们共享同一个低秩谱状态参数化，但对“如何采样 mutant、如何把 reward 变成更新方向”的处理不同。下面分开写。
+
+### 4.1 `pairwise_directional`：antithetic pairwise 采样
 
 设噪声状态为
 
@@ -186,7 +194,7 @@ $$
 \right].
 $$
 
-### 4.2 有限对采样估计
+### 4.1.1 有限对采样估计
 
 设总 mutant 数为 $K$，并要求 $K$ 为偶数。定义 antithetic pair 数
 
@@ -224,7 +232,7 @@ $$
 = \nabla_M \widetilde{J}_\sigma(M_t).
 $$
 
-### 4.3 当前代码实际实现的方向量
+### 4.1.2 当前代码实际实现的方向量
 
 定义每个 antithetic pair 的 pairwise utility / advantage 为
 
@@ -264,6 +272,111 @@ $$
 
 - `sigma` 主要决定探索半径与 reward 差分的信号质量
 - `alpha` 决定真正落地到状态上的步长尺度
+
+`pairwise_directional` 的特点是：
+
+- 每一步要求 `K` 为偶数；
+- 每个方向都成对出现，`(+epsilon, -epsilon)`；
+- 更新只看 pair 内 reward 差分，因此通常比普通 Gaussian ES 方差更小；
+- 当前实现里它与 `es.antithetic=true` 绑定。
+
+### 4.2 `gaussian_mean`：标准 Gaussian ES 采样
+
+如果不做 antithetic 成对构造，而是直接采样
+
+$$
+\varepsilon^{(i)} \sim \mathcal{N}(0, I), \qquad i = 1, \dots, K,
+$$
+
+并令
+
+$$
+M^{(i)} = M_t + \sigma \varepsilon^{(i)}, \qquad
+r_i = \widehat{J}_{\mathcal{B}}(M^{(i)}),
+$$
+
+那么标准 Gaussian ES 的估计器写成
+
+$$
+\widehat{g}_t^{\text{gauss}}
+= \frac{1}{K\sigma}\sum_{i=1}^{K} r_i \varepsilon^{(i)}.
+$$
+
+当前代码在 `es/spectral_update.py` 中对应的缓存方向是
+
+$$
+\widehat{d}_t^{\text{gauss}}
+= \frac{1}{K}\sum_{i=1}^{K} r_i \varepsilon^{(i)},
+$$
+
+然后同样在真正写回参数时再乘上 `alpha / sigma`。
+
+`gaussian_mean` 的特点是：
+
+- 不要求 antithetic pair；
+- 实现最直接，和经典 NES / Gaussian ES 写法最接近；
+- 在 reward 很稀疏或很 noisy 时，方向估计方差通常比 `pairwise_directional` 更大；
+- 但它不依赖“前半 / 后半必须成对”的结构，因此在一些自定义采样策略下更灵活。
+
+### 4.3 `per_layer_cma_es`：每层独立维护协方差的 CMA-ES
+
+第三条路径不再把所有 layer 都视为共享同一个各向同性高斯，而是对每个目标层单独维护一个搜索分布。
+
+对任意目标层 $\ell$，先把状态矩阵展平：
+
+$$
+x_\ell = \mathrm{vec}(M_\ell) \in \mathbb{R}^{r^2}.
+$$
+
+当前实现会为每个 layer 单独维护
+
+$$
+\sigma_\ell, \qquad
+C_\ell \in \mathbb{R}^{r^2 \times r^2}, \qquad
+L_\ell L_\ell^\top = C_\ell,
+$$
+
+其中 $L_\ell$ 是协方差的 Cholesky 因子。
+
+采样时，先取标准正态方向
+
+$$
+z_\ell^{(i)} \sim \mathcal{N}(0, I),
+$$
+
+再做线性变换
+
+$$
+y_\ell^{(i)} = L_\ell z_\ell^{(i)},
+$$
+
+最后构造 mutant：
+
+$$
+x_\ell^{(i)} = x_{\ell,t} + \sigma_\ell y_\ell^{(i)}.
+$$
+
+如果配置 `es.antithetic=true`，当前实现仍会先采半数 $z$，再拼接成 `(+z, -z)`，于是 layer 内的 CMA 采样也保持 antithetic 对称。
+
+拿到所有 mutant reward 后，代码会对 reward 排序，选取前 $\mu$ 个样本，用标准 CMA-ES 的重组权重构造每层加权方向：
+
+$$
+y_{\ell,w} = \sum_{j=1}^{\mu} w_j y_{\ell,(j)}, \qquad
+z_{\ell,w} = \sum_{j=1}^{\mu} w_j z_{\ell,(j)}.
+$$
+
+然后：
+
+- 用 $\sigma_\ell y_{\ell,w}$ 形成该层的均值步长；
+- 更新每层的 evolution paths `p_sigma` 与 `p_c`；
+- 用 rank-one + rank-$\mu$ 的形式更新 $C_\ell$；
+- 重新分解协方差，并自适应更新每层的 $\sigma_\ell$。
+
+因此 `per_layer_cma_es` 的本质是：
+
+- 不再固定使用各向同性高斯；
+- 每个 layer 自己学习“该往哪些方向探索、探索半径该变大还是变小”；
+- 代价是每层都要维护一个 `r^2 x r^2` 协方差矩阵，时间和显存开销都明显高于前两条标准 ES 路径。
 
 ## 5. 更新规则与 trust region
 
@@ -630,7 +743,13 @@ $$
 
 ### 8.2 ES 更新：决定每一步探索多远、更新多大
 
-当前实现遵循标准 ES 更新式
+当前实现支持三类更新规则：
+
+- `pairwise_directional`：标准 mirrored ES，用 antithetic pair 的 reward 差分做方向估计；
+- `gaussian_mean`：标准 Gaussian ES，用全部 mutant reward 的均值加权噪声方向；
+- `per_layer_cma_es`：对每个 layer 的 `vec(M_l)` 分别维护一个高斯协方差，并按 layer 独立做 CMA-ES 风格的均值 / 协方差 / `sigma` 自适应。
+
+其中前两者遵循标准 ES 更新式
 
 $$
 w \leftarrow w + \frac{\alpha}{N\sigma}\sum_{i=1}^{N} A_i\,\varepsilon_i.
@@ -646,12 +765,24 @@ $$
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `es.num_mutants` | 每步总 mutant 数，必须为偶数 | `64` | 越大，方向估计方差越小，但每步 rollout 成本越高 |
+| `es.update_rule` | 选择 `pairwise_directional`、`gaussian_mean` 或 `per_layer_cma_es` | `pairwise_directional` | 前两者更轻，`per_layer_cma_es` 会额外学习每层搜索分布 |
 | `es.sigma.m` | 扰动半径 $\sigma$ | `0.01` | 太小则 reward 差分信号弱，太大则局部线性近似变差 |
 | `es.alpha.m` | 标准 ES 更新中的步长系数 $\alpha$ | `0.005` | 直接控制更新强度；如果 loss/reward 波动很大，通常优先先降它 |
 | `es.trust_region.max_layer_step_norm.m` | 每层单步最大 Frobenius 范数 | 默认关闭 | 显式配置后可防止单次更新把某一层推得过猛 |
 | `es.trust_region.max_state_norm.m` | 每层状态最大 Frobenius 范数 | 默认关闭 | 显式配置后可限制累计状态半径，避免长期漂移到过远区域 |
 
-实践上，`es.alpha.m` 和 `es.sigma.m` 是最核心的一对算法超参数：前者决定“沿估计方向走多远”，后者决定“为估计方向做多大尺度的随机探测”。
+当 `es.update_rule=per_layer_cma_es` 时，`es.alpha.m` 不再决定均值更新，真正起作用的是 `es.sigma.m` 和 `es.cma.*`：
+
+| 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
+| --- | --- | --- | --- |
+| `es.cma.selection_ratio` | 每层 CMA-ES 重组时选取前多少比例的 mutant | `0.5` | 越小越偏 exploitation，越大越平滑 |
+| `es.cma.mean_step_scale` | 均值方向写回 `M_l` 时的额外缩放 | `1.0` | 可视为 CMA 均值步长的直接控制杆 |
+| `es.cma.min_sigma` | 每层 `sigma_l` 的最小值 | `1e-6` | 防止探索半径塌缩到 0 |
+| `es.cma.max_sigma` | 每层 `sigma_l` 的最大值 | `0.1` | 防止搜索分布膨胀过快 |
+| `es.cma.min_eigenvalue` | 每层协方差最小特征值下界 | `1e-8` | 用于数值稳定和 SPD 修复 |
+| `es.cma.jitter` | 每层协方差分解前的 jitter | `1e-10` | Cholesky / Eigh 数值稳定化 |
+
+实践上，标准 ES 更看重 `es.alpha.m` 和 `es.sigma.m`；而 `per_layer_cma_es` 更看重 `es.sigma.m`、`es.cma.selection_ratio` 和 `es.cma.mean_step_scale`。
 
 ### 8.3 训练 batch：决定每一步看多少题、每次 rollout 切多大
 
@@ -760,7 +891,6 @@ $$
 | --- | --- |
 | `prompt.template_name` | 目前未接入；实际 prompt 模板由 `data.source` 在 `data/gsm8k.py` 中选择 |
 | `prompt.require_box_answer` | 目前未接入；boxed 格式要求同样在 `data/gsm8k.py` 中硬编码 |
-| `es.update_rule` | 当前支持 `pairwise_directional` 与 `gaussian_mean` |
 | `es.antithetic` | 控制是否使用 antithetic 噪声采样 |
 
 同理，下面这些字段虽然会被读取，但当前只能取固定值，否则训练入口会直接报错：

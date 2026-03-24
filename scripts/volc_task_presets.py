@@ -42,6 +42,7 @@ class DatasetPreset:
 class ModelPreset:
     key: str
     model_path: str
+    max_new_tokens: int
     thinking: bool
     num_mutants: int
     effective_question_batch: int
@@ -56,7 +57,6 @@ class ModelPreset:
 class ParamPreset:
     key: str
     subspace_rank: int
-    sigma_m: float
     alpha_m: float
     train_steps: int
     eval_every_steps: int
@@ -66,8 +66,6 @@ class ParamPreset:
     target_modules: tuple[str, ...] = tuple(DEFAULT_TARGET_MODULES)
     band_strategy: str = "top-band"
     reward_exact_match: float = 1.0
-    antithetic: bool = True
-    update_rule: str = "pairwise_directional"
     split_seed: int = 42
     seed: int = 42
     trust_region_max_layer_step_norm_m: float = 0.0
@@ -79,10 +77,21 @@ class ParamPreset:
 
 
 @dataclass(frozen=True)
+class SamplingPreset:
+    key: str
+    update_rule: str
+    antithetic: bool
+    sigma_m: float
+    mechanism_label: str = ""
+    mechanism_summary: str = ""
+
+
+@dataclass(frozen=True)
 class TaskSelection:
     dataset: DatasetPreset
     model: ModelPreset
     params: ParamPreset
+    sampling: SamplingPreset
     gpu_count: int
     wandb_group: str
     output_root_dir: str = str(OUTPUT_ROOT_DIR)
@@ -93,6 +102,7 @@ class ResolvedTaskConfig:
     dataset: DatasetPreset
     model: ModelPreset
     params: ParamPreset
+    sampling: SamplingPreset
     gpu_count: int
     world_size: int
     gpus_per_node: int
@@ -122,11 +132,9 @@ DATASET_PRESETS: dict[str, DatasetPreset] = {
             "use_chat_template": True,
         },
         generation_overrides={
-            "max_new_tokens": 4096,
             "temperature": 0.0,
         },
         vllm_overrides={
-            "max_model_len": 4096,
             "enforce_eager": True,
         },
         tags=("gsm8k",),
@@ -153,11 +161,9 @@ DATASET_PRESETS: dict[str, DatasetPreset] = {
             "use_chat_template": True,
         },
         generation_overrides={
-            "max_new_tokens": 4096,
             "temperature": 0.0,
         },
         vllm_overrides={
-            "max_model_len": 4096,
             "enforce_eager": True,
         },
         tags=("mmlu_pro",),
@@ -170,15 +176,27 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     "qwen3_0p6b_base": ModelPreset(
         key="qwen3_0p6b_base",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B-Base",
+        max_new_tokens=4096,
         thinking=False,
         num_mutants=64,
         effective_question_batch=64,
         eval_micro_batch=256,
         max_cpu_loras=32,
     ),
-    "qwen3_0p6b": ModelPreset(
-        key="qwen3_0p6b",
+    "qwen3_0p6b_nothink": ModelPreset(
+        key="qwen3_0p6b_nothink",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B",
+        max_new_tokens=2048,
+        thinking=False,
+        num_mutants=32,
+        effective_question_batch=128,
+        eval_micro_batch=256,
+        max_cpu_loras=32,
+    ),
+    "qwen3_0p6b_think": ModelPreset(
+        key="qwen3_0p6b_think",
+        model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B",
+        max_new_tokens=4096,
         thinking=True,
         num_mutants=64,
         effective_question_batch=64,
@@ -188,6 +206,7 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     "qwen3_8b": ModelPreset(
         key="qwen3_8b",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-8B",
+        max_new_tokens=4096,
         thinking=True,
         num_mutants=32,
         effective_question_batch=64,
@@ -197,11 +216,66 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
 }
 
 
+SAMPLING_PRESETS: dict[str, SamplingPreset] = {
+    # 1) Mirrored ES with antithetic pairwise reward differences.
+    "pairwise": SamplingPreset(
+        key="pairwise",
+        update_rule="pairwise_directional",
+        antithetic=True,
+        sigma_m=0.001,
+        mechanism_label="Pairwise directional ES",
+        mechanism_summary="antithetic mirrored ES with pairwise reward differences",
+    ),
+    # 2) Plain Gaussian ES with reward-weighted mean noise directions.
+    "gaussian": SamplingPreset(
+        key="gaussian",
+        update_rule="gaussian_mean",
+        antithetic=False,
+        sigma_m=0.001,
+        mechanism_label="Gaussian mean ES",
+        mechanism_summary="standard Gaussian ES using reward-weighted mean directions",
+    ),
+    # 3) Per-layer CMA-ES with layerwise covariance and sigma adaptation.
+    "cma": SamplingPreset(
+        key="cma",
+        update_rule="per_layer_cma_es",
+        antithetic=True,
+        sigma_m=0.001,
+        mechanism_label="Per-layer CMA-ES",
+        mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
+    ),
+    # Backward-compatible aliases used by existing tests and helper scripts.
+    "pairwise_default": SamplingPreset(
+        key="pairwise_default",
+        update_rule="pairwise_directional",
+        antithetic=True,
+        sigma_m=0.001,
+        mechanism_label="Pairwise directional ES",
+        mechanism_summary="antithetic mirrored ES with pairwise reward differences",
+    ),
+    "gaussian_mean_default": SamplingPreset(
+        key="gaussian_mean_default",
+        update_rule="gaussian_mean",
+        antithetic=False,
+        sigma_m=0.001,
+        mechanism_label="Gaussian mean ES",
+        mechanism_summary="standard Gaussian ES using reward-weighted mean directions",
+    ),
+    "per_layer_cma": SamplingPreset(
+        key="per_layer_cma",
+        update_rule="per_layer_cma_es",
+        antithetic=True,
+        sigma_m=0.001,
+        mechanism_label="Per-layer CMA-ES",
+        mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
+    ),
+}
+
+
 PARAM_PRESETS: dict[str, ParamPreset] = {
     "default": ParamPreset(
         key="default",
         subspace_rank=32,
-        sigma_m=0.001,
         alpha_m=0.0005,
         train_steps=500,
         eval_every_steps=5,
@@ -226,6 +300,7 @@ def resolve_task_selection(selection: TaskSelection) -> ResolvedTaskConfig:
         dataset=selection.dataset,
         model=selection.model,
         params=selection.params,
+        sampling=selection.sampling,
         gpu_count=gpu_count,
         world_size=gpu_count,
         gpus_per_node=gpu_count,
@@ -265,10 +340,11 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
     thinking_tag = "thinking" if config.model.thinking else "nothinking"
     dataset_tag = config.dataset.key
     blocks_tag = target_blocks_tag(config.params.target_blocks)
+    sampling_tag = config.sampling.key.replace("_default", "")
     suffix_parts = [
         timestamp,
         dataset_tag,
-        "pairwise",
+        sampling_tag,
         blocks_tag,
         "allmodules",
         f"r{config.params.subspace_rank}",
@@ -277,7 +353,7 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
         f"mb{config.train_micro_batch}",
         f"chunk{config.mutant_chunk_size}",
         f"{config.gpu_count}gpu",
-        f"sigma{str(config.params.sigma_m).replace('.', 'p')}",
+        f"sigma{str(config.sampling.sigma_m).replace('.', 'p')}",
         model_tag,
         thinking_tag,
     ]
@@ -287,6 +363,14 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
 
 
 def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
+    generation_overrides = {
+        **config.dataset.generation_overrides,
+        "max_new_tokens": config.model.max_new_tokens,
+    }
+    vllm_overrides = {
+        "max_model_len": config.model.max_new_tokens,
+        **config.dataset.vllm_overrides,
+    }
     overrides = [
         f"seed={config.params.seed}",
         f"model.model_path={config.model.model_path}",
@@ -299,10 +383,10 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"execution.mutants_per_worker={config.mutants_per_worker}",
         f"execution.mutant_chunk_size={config.mutant_chunk_size}",
         f"es.num_mutants={config.model.num_mutants}",
-        f"es.update_rule={config.params.update_rule}",
-        f"es.antithetic={format_override_value(config.params.antithetic)}",
+        f"es.update_rule={config.sampling.update_rule}",
+        f"es.antithetic={format_override_value(config.sampling.antithetic)}",
         f"es.alpha.m={config.params.alpha_m}",
-        f"es.sigma.m={config.params.sigma_m}",
+        f"es.sigma.m={config.sampling.sigma_m}",
         f"es.trust_region.max_layer_step_norm.m={config.params.trust_region_max_layer_step_norm_m}",
         f"es.trust_region.max_state_norm.m={config.params.trust_region_max_state_norm_m}",
         f"reward.exact_match={config.params.reward_exact_match}",
@@ -338,8 +422,8 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
             {**config.dataset.prompt_overrides, "enable_thinking": config.model.thinking},
         )
     )
-    overrides.extend(_dict_to_overrides("generation", config.dataset.generation_overrides))
-    overrides.extend(_dict_to_overrides("vllm", config.dataset.vllm_overrides))
+    overrides.extend(_dict_to_overrides("generation", generation_overrides))
+    overrides.extend(_dict_to_overrides("vllm", vllm_overrides))
     model_name = Path(config.model.model_path).name
     tags = list(config.dataset.tags) + [
         "spectral_es",
@@ -360,11 +444,14 @@ def _dict_to_overrides(prefix: str, payload: dict[str, Any]) -> list[str]:
 
 
 def build_description(config: ResolvedTaskConfig) -> str:
+    mechanism_label = config.sampling.mechanism_label or config.sampling.key
+    mechanism_summary = config.sampling.mechanism_summary or config.sampling.update_rule
     return (
         f"{config.dataset.description_label} vLLM Spectral-ES run with rank {config.params.subspace_rank}, "
         f"K={config.model.num_mutants}, q_batch={config.model.effective_question_batch}, "
         f"micro_batch={config.train_micro_batch}, chunk={config.mutant_chunk_size}, "
-        f"eval split {config.params.eval_split}, thinking={config.model.thinking}, "
+        f"sampling={mechanism_label} ({mechanism_summary}), eval split {config.params.eval_split}, "
+        f"thinking={config.model.thinking}, "
         f"gpu_count={config.gpu_count}."
     )
 
@@ -474,6 +561,7 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "dataset": resolved.dataset.key,
         "model": resolved.model.key,
         "params": resolved.params.key,
+        "sampling": resolved.sampling.key,
         "gpu_count": resolved.gpu_count,
         "world_size": resolved.world_size,
         "flavor": resolved.flavor,
@@ -488,8 +576,10 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "num_mutants": resolved.model.num_mutants,
         "effective_question_batch": resolved.model.effective_question_batch,
         "subspace_rank": resolved.params.subspace_rank,
-        "sigma_m": resolved.params.sigma_m,
+        "sigma_m": resolved.sampling.sigma_m,
         "alpha_m": resolved.params.alpha_m,
+        "update_rule": resolved.sampling.update_rule,
+        "antithetic": resolved.sampling.antithetic,
         "thinking": resolved.model.thinking,
         "target_blocks": resolved.params.target_blocks,
     }

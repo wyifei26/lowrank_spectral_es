@@ -1,5 +1,6 @@
 import torch
 
+from es.cma import PerLayerCMAES
 from es.noise import sample_antithetic_normal, sample_standard_normal
 from es.spectral_update import (
     apply_alpha_update_to_direction_payloads,
@@ -124,3 +125,107 @@ def test_gaussian_direction_uses_mean_reward_weighted_noise():
     torch.testing.assert_close(direction_payloads["layer"]["m"], expected)
     assert stats["reward_mean"] == 2.0
     assert stats["reward_nonzero_rate"] == 1.0
+
+
+def test_per_layer_cma_sampling_keeps_antithetic_pairs():
+    cma = PerLayerCMAES(
+        layer_shapes={"layer": torch.Size([2, 2])},
+        sigma_config={"m": 0.5},
+    )
+
+    noise_payloads = cma.sample_noise(4, antithetic=True)
+    transformed = noise_payloads["layer"]["m"]
+    standard = noise_payloads["layer"]["m_z"]
+
+    torch.testing.assert_close(standard[0], -standard[2])
+    torch.testing.assert_close(standard[1], -standard[3])
+    torch.testing.assert_close(transformed[0], -transformed[2])
+    torch.testing.assert_close(transformed[1], -transformed[3])
+
+
+def test_per_layer_cma_update_returns_clipped_step_and_updates_internal_state():
+    cma = PerLayerCMAES(
+        layer_shapes={"layer": torch.Size([2, 2])},
+        sigma_config={"m": 0.5},
+        cma_config={"selection_ratio": 0.5, "mean_step_scale": 1.0, "max_sigma": 10.0},
+    )
+    noise_payloads = {
+        "layer": {
+            "m": torch.tensor(
+                [
+                    [[1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, 1.0], [0.0, 0.0]],
+                    [[-1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, -1.0], [0.0, 0.0]],
+                ],
+                dtype=torch.float32,
+            ),
+            "m_z": torch.tensor(
+                [
+                    [[1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, 1.0], [0.0, 0.0]],
+                    [[-1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, -1.0], [0.0, 0.0]],
+                ],
+                dtype=torch.float32,
+            ),
+        }
+    }
+    rewards = torch.tensor([4.0, 3.0, 1.0, 0.0], dtype=torch.float32)
+
+    step_payloads, direction_stats, step_stats = cma.apply_update(
+        rewards=rewards,
+        noise_payloads=noise_payloads,
+        current_states={"layer": torch.zeros(2, 2, dtype=torch.float32)},
+        max_layer_step_config={"m": 0.3},
+        max_state_norm=0.4,
+    )
+
+    weights = torch.tensor(
+        [
+            torch.log(torch.tensor(2.5)) - torch.log(torch.tensor(1.0)),
+            torch.log(torch.tensor(2.5)) - torch.log(torch.tensor(2.0)),
+        ],
+        dtype=torch.float32,
+    )
+    weights /= weights.sum()
+    expected_raw = 0.5 * torch.tensor([[weights[0], weights[1]], [0.0, 0.0]], dtype=torch.float32)
+    expected_step = expected_raw * (0.3 / torch.linalg.vector_norm(expected_raw))
+
+    torch.testing.assert_close(step_payloads["layer"]["m"], expected_step)
+    assert direction_stats["cma_selected_reward_mean"] == 3.5
+    assert step_stats["step_layers_clipped"] == 1.0
+    assert step_stats["step_layer_max_norm"] <= 0.300001
+    assert cma.layers["layer"].generation == 1
+    assert float(cma.layers["layer"].sigma.item()) > 0.0
+
+
+def test_per_layer_cma_state_dict_round_trip_preserves_layer_statistics():
+    source = PerLayerCMAES(
+        layer_shapes={"layer": torch.Size([2, 2])},
+        sigma_config={"m": 0.25},
+        cma_config={"selection_ratio": 0.5, "mean_step_scale": 0.8, "max_sigma": 5.0},
+    )
+    target = PerLayerCMAES(
+        layer_shapes={"layer": torch.Size([2, 2])},
+        sigma_config={"m": 0.25},
+    )
+
+    source.layers["layer"].sigma = torch.tensor(0.7, dtype=torch.float32)
+    source.layers["layer"].cov = torch.tensor(
+        [[2.0, 0.1, 0.0, 0.0], [0.1, 1.5, 0.0, 0.0], [0.0, 0.0, 1.2, 0.2], [0.0, 0.0, 0.2, 0.9]],
+        dtype=torch.float32,
+    )
+    source.layers["layer"].chol = torch.linalg.cholesky(source.layers["layer"].cov)
+    source.layers["layer"].p_sigma = torch.tensor([0.2, -0.1, 0.0, 0.3], dtype=torch.float32)
+    source.layers["layer"].p_c = torch.tensor([0.0, 0.1, 0.2, -0.2], dtype=torch.float32)
+    source.layers["layer"].generation = 4
+
+    target.load_state_dict(source.state_dict())
+
+    torch.testing.assert_close(target.layers["layer"].sigma, source.layers["layer"].sigma)
+    torch.testing.assert_close(target.layers["layer"].cov, source.layers["layer"].cov)
+    torch.testing.assert_close(target.layers["layer"].chol, source.layers["layer"].chol)
+    torch.testing.assert_close(target.layers["layer"].p_sigma, source.layers["layer"].p_sigma)
+    torch.testing.assert_close(target.layers["layer"].p_c, source.layers["layer"].p_c)
+    assert target.layers["layer"].generation == 4

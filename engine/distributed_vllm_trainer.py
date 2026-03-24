@@ -25,6 +25,7 @@ from engine.distributed_utils import (
 )
 from engine.gpu_monitor import GPUMonitor, GPUMonitorSnapshot
 from engine.vllm_executor import VLLMSpectralExecutor
+from es.cma import PerLayerCMAES
 from es.noise import seed_everything
 from es.spectral_update import (
     apply_alpha_update_to_direction_payloads,
@@ -57,6 +58,8 @@ def _is_base_model(model_path: str | os.PathLike[str]) -> bool:
 
 
 class DistributedVLLMSpectralESTrainer:
+    TRAIN_SAMPLE_PREVIEW_LIMIT = 16
+
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         required_envs = ["RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"]
@@ -106,6 +109,8 @@ class DistributedVLLMSpectralESTrainer:
         self.adapter_root.mkdir(parents=True, exist_ok=True)
         self.train_sample_root = self.output_dir / "train_samples"
         self.train_sample_root.mkdir(parents=True, exist_ok=True)
+        self.eval_output_root = self.output_dir / "eval_outputs"
+        self.eval_output_root.mkdir(parents=True, exist_ok=True)
         self.wandb_run = None
         self.gpu_monitor = GPUMonitor(device_index=self.local_rank)
         seed_everything(int(config["seed"]) + self.rank)
@@ -200,6 +205,14 @@ class DistributedVLLMSpectralESTrainer:
             selections=selections,
             cache_payload=cache_payload,
         )
+        update_rule = config.get("es", {}).get("update_rule", "pairwise_directional")
+        self.cma_state: PerLayerCMAES | None = None
+        if update_rule == "per_layer_cma_es":
+            self.cma_state = PerLayerCMAES(
+                layer_shapes={name: adapter.m_state.shape for name, adapter in self.state.adapters.items()},
+                sigma_config=config["es"]["sigma"],
+                cma_config=dict(config.get("es", {}).get("cma", {})),
+            )
         cleanup_cpu_model(cpu_model)
 
         vllm_config = config.get("vllm", {})
@@ -376,7 +389,7 @@ class DistributedVLLMSpectralESTrainer:
             raise ValueError("num_mutants must be even for antithetic sampling")
         if update_rule == "pairwise_directional" and not antithetic:
             raise ValueError("pairwise_directional requires es.antithetic=true")
-        if update_rule not in {"pairwise_directional", "gaussian_mean"}:
+        if update_rule not in {"pairwise_directional", "gaussian_mean", "per_layer_cma_es"}:
             raise ValueError(f"unsupported es.update_rule: {update_rule}")
         if execution_config.get("backend", self.config.get("execution", {}).get("backend")) == "hf":
             raise ValueError("DistributedVLLMSpectralESTrainer only supports the vllm backend")
@@ -481,6 +494,7 @@ class DistributedVLLMSpectralESTrainer:
             "step": step,
             "best_val_accuracy": best_val_accuracy,
             "adapter_state": self.state.adapter_state_dict(),
+            "cma_state": self.cma_state.state_dict() if self.cma_state is not None else None,
             "config": self.config,
             "current_k": current_k,
             "current_micro_batch": current_micro_batch,
@@ -508,8 +522,11 @@ class DistributedVLLMSpectralESTrainer:
         step_dir = self.train_sample_root / f"step_{step:04d}"
         step_dir.mkdir(parents=True, exist_ok=True)
         output_path = step_dir / f"rank_{self.rank:02d}.jsonl"
-        write_jsonl(output_path, predictions)
+        write_jsonl(output_path, predictions[: self.TRAIN_SAMPLE_PREVIEW_LIMIT])
         return output_path
+
+    def _resolve_eval_output_dir(self, *, split: str, step: int) -> Path:
+        return self.eval_output_root / split / f"step_{step:04d}"
 
     def _resolve_eval_micro_batch(self) -> int:
         eval_config = self.config.get("eval", {})
@@ -615,7 +632,7 @@ class DistributedVLLMSpectralESTrainer:
 
     def run_baseline(self, *, split: str = "test", max_examples: int = 0) -> dict:
         if self.is_main_process:
-            output_root = Path(self.config["baseline"]["output_dir"]) / self.run_id / split
+            output_root = self._resolve_eval_output_dir(split=split, step=0)
             self.log_event(
                 "BASELINE_START",
                 {"split": split, "max_examples": max_examples if max_examples > 0 else len(self._select_records(split))},
@@ -647,10 +664,14 @@ class DistributedVLLMSpectralESTrainer:
 
     def _sample_noise(self, current_k: int) -> dict[str, dict[str, torch.Tensor]]:
         if self.is_main_process:
-            noise_payloads = self.state.sample_noise(
-                current_k,
-                antithetic=bool(self.config.get("es", {}).get("antithetic", True)),
-            )
+            antithetic = bool(self.config.get("es", {}).get("antithetic", True))
+            update_rule = self.config.get("es", {}).get("update_rule", "pairwise_directional")
+            if update_rule == "per_layer_cma_es":
+                if self.cma_state is None:
+                    raise RuntimeError("per_layer_cma_es requires CMA state to be initialized")
+                noise_payloads = self.cma_state.sample_noise(current_k, antithetic=antithetic)
+            else:
+                noise_payloads = self.state.sample_noise(current_k, antithetic=antithetic)
         else:
             noise_payloads = None
         return self._broadcast_object(noise_payloads)
@@ -752,18 +773,43 @@ class DistributedVLLMSpectralESTrainer:
                     noise_payloads=noise_payloads,
                     rewards=global_rewards,
                 )
+                trust_region = self.config.get("es", {}).get("trust_region", {})
+                step_payloads, step_stats = apply_alpha_update_to_direction_payloads(
+                    direction_payloads=direction_payloads,
+                    alpha_config=self.config["es"].get(
+                        "alpha",
+                        self.config["es"].get("learning_rate", self.config["es"].get("step_size", {"m": 0.005})),
+                    ),
+                    sigma_config=self.config["es"]["sigma"],
+                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
+                )
+            elif update_rule == "per_layer_cma_es":
+                if self.cma_state is None:
+                    raise RuntimeError("per_layer_cma_es requires CMA state to be initialized")
+                trust_region = self.config.get("es", {}).get("trust_region", {})
+                max_state_norm = None
+                if "max_state_norm" in trust_region:
+                    max_state_norm = resolve_named_value(trust_region["max_state_norm"], "m")
+                step_payloads, direction_stats, step_stats = self.cma_state.apply_update(
+                    rewards=global_rewards,
+                    noise_payloads=noise_payloads,
+                    current_states={name: adapter.m_state.detach().cpu().clone() for name, adapter in self.state.adapters.items()},
+                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
+                    max_state_norm=max_state_norm,
+                )
             else:
                 raise ValueError(f"unsupported es.update_rule: {update_rule}")
-            trust_region = self.config.get("es", {}).get("trust_region", {})
-            step_payloads, step_stats = apply_alpha_update_to_direction_payloads(
-                direction_payloads=direction_payloads,
-                alpha_config=self.config["es"].get(
-                    "alpha",
-                    self.config["es"].get("learning_rate", self.config["es"].get("step_size", {"m": 0.005})),
-                ),
-                sigma_config=self.config["es"]["sigma"],
-                max_layer_step_config=trust_region.get("max_layer_step_norm"),
-            )
+            if update_rule == "pairwise_directional":
+                trust_region = self.config.get("es", {}).get("trust_region", {})
+                step_payloads, step_stats = apply_alpha_update_to_direction_payloads(
+                    direction_payloads=direction_payloads,
+                    alpha_config=self.config["es"].get(
+                        "alpha",
+                        self.config["es"].get("learning_rate", self.config["es"].get("step_size", {"m": 0.005})),
+                    ),
+                    sigma_config=self.config["es"]["sigma"],
+                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
+                )
         else:
             global_rewards = None
             global_exact_match_rates = None
@@ -824,7 +870,7 @@ class DistributedVLLMSpectralESTrainer:
             best_summary = self._evaluate_split(
                 split=eval_split,
                 step=0,
-                output_dir=self.output_dir / f"baseline_{eval_split}",
+                output_dir=self._resolve_eval_output_dir(split=eval_split, step=0),
             )
             if self.is_main_process:
                 self.log_event("BASELINE_DONE", {"split": eval_split, "accuracy": best_summary["accuracy"]})
@@ -843,7 +889,7 @@ class DistributedVLLMSpectralESTrainer:
                 summary = self._evaluate_split(
                     split=eval_split,
                     step=step,
-                    output_dir=self.output_dir / f"{eval_split}_step_{step:04d}",
+                    output_dir=self._resolve_eval_output_dir(split=eval_split, step=step),
                 )
                 if self.is_main_process:
                     self._save_checkpoint(
