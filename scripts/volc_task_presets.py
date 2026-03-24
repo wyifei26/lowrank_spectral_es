@@ -244,31 +244,6 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         mechanism_label="Per-layer CMA-ES",
         mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
     ),
-    # Backward-compatible aliases used by existing tests and helper scripts.
-    "pairwise_default": SamplingPreset(
-        key="pairwise_default",
-        update_rule="pairwise_directional",
-        antithetic=True,
-        sigma_m=0.001,
-        mechanism_label="Pairwise directional ES",
-        mechanism_summary="antithetic mirrored ES with pairwise reward differences",
-    ),
-    "gaussian_mean_default": SamplingPreset(
-        key="gaussian_mean_default",
-        update_rule="gaussian_mean",
-        antithetic=False,
-        sigma_m=0.001,
-        mechanism_label="Gaussian mean ES",
-        mechanism_summary="standard Gaussian ES using reward-weighted mean directions",
-    ),
-    "per_layer_cma": SamplingPreset(
-        key="per_layer_cma",
-        update_rule="per_layer_cma_es",
-        antithetic=True,
-        sigma_m=0.001,
-        mechanism_label="Per-layer CMA-ES",
-        mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
-    ),
 }
 
 

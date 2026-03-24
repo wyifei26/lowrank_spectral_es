@@ -16,7 +16,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm import LLM
 
 from config_utils import dump_yaml_config
-from data.gsm8k import apply_chat_template_to_records, ensure_processed_dataset, load_records
+from data import apply_chat_template_to_records, ensure_processed_dataset, load_records
 from engine.distributed_utils import (
     MutantShard,
     aggregate_distributed_step_metrics,
