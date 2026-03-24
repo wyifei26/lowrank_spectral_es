@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -20,9 +21,12 @@ SVD_CACHE_DIR = PROJECT_DIR / "artifacts" / "svd_cache"
 VOLC_CONFIG_ROOT = ROOT / "volc" / "task-configs"
 DEFAULT_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 GPU_FLAVORS = {
+    1: "ml.pni2.3xlarge",
+    2: "ml.pni2.7xlarge",
     4: "ml.pni2.14xlarge",
     8: "ml.pni2.28xlarge",
 }
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(frozen=True)
@@ -222,7 +226,7 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         key="pairwise",
         update_rule="pairwise_directional",
         antithetic=True,
-        sigma_m=0.001,
+        sigma_m=0.01,
         mechanism_label="Pairwise directional ES",
         mechanism_summary="antithetic mirrored ES with pairwise reward differences",
     ),
@@ -231,7 +235,7 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         key="gaussian",
         update_rule="gaussian_mean",
         antithetic=False,
-        sigma_m=0.001,
+        sigma_m=0.01,
         mechanism_label="Gaussian mean ES",
         mechanism_summary="standard Gaussian ES using reward-weighted mean directions",
     ),
@@ -240,7 +244,7 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         key="cma",
         update_rule="per_layer_cma_es",
         antithetic=True,
-        sigma_m=0.001,
+        sigma_m=0.01,
         mechanism_label="Per-layer CMA-ES",
         mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
     ),
@@ -251,7 +255,7 @@ PARAM_PRESETS: dict[str, ParamPreset] = {
     "default": ParamPreset(
         key="default",
         subspace_rank=32,
-        alpha_m=0.0005,
+        alpha_m=0.005,
         train_steps=500,
         eval_every_steps=5,
         eval_split="test",
@@ -289,7 +293,7 @@ def resolve_task_selection(selection: TaskSelection) -> ResolvedTaskConfig:
 
 
 def timestamp_now() -> str:
-    return datetime.now(timezone.utc).strftime("%m%d-%H%M")
+    return datetime.now(BEIJING_TZ).strftime("%m%d-%H%M")
 
 
 def format_override_value(value: Any) -> str:

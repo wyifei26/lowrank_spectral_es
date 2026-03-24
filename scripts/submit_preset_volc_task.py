@@ -18,7 +18,7 @@ from volc_task_presets import (
 DATASET_KEY = "gsm8k"
 MODEL_KEY = "qwen3_0p6b_nothink"
 PARAM_KEY = "default"
-SAMPLING_KEY = "cms"
+SAMPLING_KEY = "cma"
 GPU_COUNT = 4
 
 # Optional knobs for the generated task.

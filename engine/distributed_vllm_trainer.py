@@ -5,9 +5,10 @@ import os
 import random
 import time
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import torch
 import torch.distributed as dist
@@ -39,6 +40,9 @@ from models.base_loader import load_causal_lm, load_tokenizer, resolve_dtype
 from models.layer_selector import select_target_layers
 from models.spectral_vllm import build_vllm_spectral_state, cleanup_cpu_model
 from models.svd_cache import load_or_create_svd_cache, resolve_svd_cache_path
+
+
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _patch_transformers_tokenizer_compat() -> None:
@@ -463,11 +467,27 @@ class DistributedVLLMSpectralESTrainer:
             return metrics, {"trainer/tag": tag}
         return {}, {"trainer/tag": tag}
 
+    @staticmethod
+    def _now_beijing() -> datetime:
+        return datetime.now(BEIJING_TZ)
+
     def log_event(self, tag: str, payload: dict[str, Any]) -> None:
         if not self.is_main_process:
             return
-        record = {"tag": tag, "time": time.time(), **payload}
-        print(f"{tag} {json.dumps(payload, ensure_ascii=True, sort_keys=True)}", flush=True)
+        now = self._now_beijing()
+        record = {
+            "tag": tag,
+            "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": "Asia/Shanghai",
+            "timestamp": now.timestamp(),
+            **payload,
+        }
+        console_payload = {
+            "time": record["time"],
+            "timezone": record["timezone"],
+            **payload,
+        }
+        print(f"{tag} {json.dumps(console_payload, ensure_ascii=True, sort_keys=True)}", flush=True)
         with self.metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=True) + "\n")
         if self.wandb_run is not None:
