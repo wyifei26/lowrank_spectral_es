@@ -5,6 +5,7 @@ from __future__ import annotations
 from volc_task_presets import (
     DATASET_PRESETS,
     MODEL_PRESETS,
+    PARAMETERIZATION_PRESETS,
     PARAM_PRESETS,
     SAMPLING_PRESETS,
     TaskSelection,
@@ -14,12 +15,13 @@ from volc_task_presets import (
 )
 
 
-# Edit these five values before running the script.
-DATASET_KEY = "gsm8k"
-MODEL_KEY = "qwen3_0p6b_nothink"
+# Edit these six values before running the script.
+DATASET_KEY = "math_data"
+MODEL_KEY = "qwen3_8b_base"
+PARAMETERIZATION_KEY = "full_factorized_m"
 PARAM_KEY = "default"
 SAMPLING_KEY = "cma"
-GPU_COUNT = 4
+GPU_COUNT = 8
 
 # Optional knobs for the generated task.
 WANDB_GROUP = "spectral_es_manual"
@@ -29,6 +31,7 @@ def main() -> None:
     selection = TaskSelection(
         dataset=DATASET_PRESETS[DATASET_KEY],
         model=MODEL_PRESETS[MODEL_KEY],
+        parameterization=PARAMETERIZATION_PRESETS[PARAMETERIZATION_KEY],
         params=PARAM_PRESETS[PARAM_KEY],
         sampling=SAMPLING_PRESETS[SAMPLING_KEY],
         gpu_count=GPU_COUNT,

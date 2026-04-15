@@ -8,6 +8,7 @@ import torch
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
+from data.common import canonical_benchmark_name
 from engine.profiler import ThroughputProfiler
 from eval.reward_router import score_record_prediction
 from models.spectral_vllm import SpectralVLLMState
@@ -19,6 +20,7 @@ class VLLMBatchExecutionResult:
     exact_match_rates: torch.Tensor
     predictions: list[dict]
     profiler_snapshot: dict[str, float]
+    benchmark_metrics: dict[str, dict[str, float]]
 
 
 class VLLMSpectralExecutor:
@@ -30,6 +32,9 @@ class VLLMSpectralExecutor:
         model_path: str,
         max_new_tokens: int,
         temperature: float,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        presence_penalty: float = 0.0,
         mutant_chunk_size: int,
         adapter_root: str | Path,
         rank: int = 0,
@@ -40,6 +45,9 @@ class VLLMSpectralExecutor:
         self.model_path = model_path
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.presence_penalty = presence_penalty
         self.mutant_chunk_size = mutant_chunk_size
         self.adapter_root = Path(adapter_root)
         self.adapter_root.mkdir(parents=True, exist_ok=True)
@@ -47,6 +55,9 @@ class VLLMSpectralExecutor:
         self.reward_config = reward_config or {}
         self.sampling_params = SamplingParams(
             temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence_penalty=presence_penalty,
             max_tokens=max_new_tokens,
         )
         self._request_counter = 1
@@ -92,6 +103,7 @@ class VLLMSpectralExecutor:
         rewards = torch.zeros(1, dtype=torch.float32)
         counts = torch.zeros(1, dtype=torch.float32)
         exact_matches = torch.zeros(1, dtype=torch.float32)
+        benchmark_metrics: dict[str, dict[str, float]] = {}
 
         current_request = None
         if not use_base_model:
@@ -99,7 +111,6 @@ class VLLMSpectralExecutor:
             current_dir = self.state.export_adapter(
                 output_dir=self.adapter_root / current_state_name,
                 base_model_name_or_path=self.model_path,
-                rank=next(iter(self.state.adapters.values())).m_state.shape[0],
                 adapter_name=current_state_name,
             )
             current_request = self._next_lora_request(path=current_dir, slot_name=current_state_name)
@@ -128,11 +139,23 @@ class VLLMSpectralExecutor:
                 rewards[0] += result.reward
                 counts[0] += 1
                 exact_matches[0] += float(result.correct)
+                benchmark_name = canonical_benchmark_name(
+                    q_records[idx].get("data_source") or q_records[idx].get("source")
+                )
+                benchmark_payload = benchmark_metrics.setdefault(
+                    benchmark_name,
+                    {"num_examples": 0.0, "reward_sum": 0.0, "exact_match_sum": 0.0},
+                )
+                benchmark_payload["num_examples"] += 1.0
+                benchmark_payload["reward_sum"] += float(result.reward)
+                benchmark_payload["exact_match_sum"] += float(result.correct)
                 if collect_predictions:
                     predictions.append(
                         {
                             "record_index": q_records[idx].get("_record_index"),
                             "id": q_records[idx]["id"],
+                            "data_source": q_records[idx].get("data_source"),
+                            "benchmark": benchmark_name,
                             "question": q_records[idx]["question"],
                             "gold_value": result.gold_value,
                             "prediction": text,
@@ -150,6 +173,7 @@ class VLLMSpectralExecutor:
             exact_match_rates=exact_matches / counts,
             predictions=predictions,
             profiler_snapshot=profiler.snapshot(),
+            benchmark_metrics=benchmark_metrics,
         )
 
     def score_active_mutants(
@@ -180,7 +204,6 @@ class VLLMSpectralExecutor:
         counts = torch.zeros(len(mutant_indices), dtype=torch.float32)
         exact_matches = torch.zeros(len(mutant_indices), dtype=torch.float32)
         predictions: list[dict] = []
-        rank = next(iter(self.state.adapters.values())).m_state.shape[0]
 
         local_index_by_mutant = {mutant_index: local_index for local_index, mutant_index in enumerate(mutant_indices)}
 
@@ -191,7 +214,6 @@ class VLLMSpectralExecutor:
                 path = self.state.export_adapter(
                     output_dir=self.adapter_root / f"mutant_{global_mutant:04d}",
                     base_model_name_or_path=self.model_path,
-                    rank=rank,
                     adapter_name=f"mutant_{global_mutant:04d}",
                     active_index=global_mutant,
                 )
@@ -260,4 +282,5 @@ class VLLMSpectralExecutor:
             exact_match_rates=exact_matches / counts,
             predictions=predictions,
             profiler_snapshot=profiler.snapshot(),
+            benchmark_metrics={},
         )

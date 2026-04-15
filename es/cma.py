@@ -43,43 +43,10 @@ def _layer_chi_norm(dim: int) -> float:
     return math.sqrt(float(dim)) * (1.0 - 1.0 / (4.0 * dim) + 1.0 / (21.0 * dim * dim))
 
 
-def _factorize_spd(
-    matrix: torch.Tensor,
-    *,
-    min_eigenvalue: float,
-    jitter: float,
-    max_attempts: int = 5,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    sym = 0.5 * (matrix.float() + matrix.float().transpose(0, 1))
-    identity = torch.eye(sym.shape[0], dtype=sym.dtype, device=sym.device)
-    attempt_jitter = max(jitter, 0.0)
-    for _ in range(max_attempts):
-        try:
-            work = sym if attempt_jitter == 0.0 else sym + identity * attempt_jitter
-            chol = torch.linalg.cholesky(work)
-            eigvals = torch.linalg.eigvalsh(work)
-            if min_eigenvalue > 0.0 and float(eigvals.min().item()) < min_eigenvalue:
-                eigvals = torch.clamp_min(eigvals, min_eigenvalue)
-                eigvecs = torch.linalg.eigh(work)[1]
-                work = (eigvecs * eigvals.unsqueeze(0)) @ eigvecs.transpose(0, 1)
-                chol = torch.linalg.cholesky(0.5 * (work + work.transpose(0, 1)))
-            return 0.5 * (work + work.transpose(0, 1)), chol
-        except RuntimeError:
-            attempt_jitter = max(1e-12, attempt_jitter * 10.0 if attempt_jitter > 0.0 else 1e-12)
-
-    eigvals, eigvecs = torch.linalg.eigh(sym)
-    eigvals = torch.clamp_min(eigvals, min_eigenvalue if min_eigenvalue > 0.0 else 1e-12)
-    repaired = (eigvecs * eigvals.unsqueeze(0)) @ eigvecs.transpose(0, 1)
-    repaired = 0.5 * (repaired + repaired.transpose(0, 1))
-    chol = torch.linalg.cholesky(repaired)
-    return repaired, chol
-
-
 @dataclass
 class LayerCMAState:
     sigma: torch.Tensor
-    cov: torch.Tensor
-    chol: torch.Tensor
+    cov_diag: torch.Tensor
     p_sigma: torch.Tensor
     p_c: torch.Tensor
     generation: int = 0
@@ -107,16 +74,12 @@ class PerLayerCMAES:
         self.min_sigma = _resolve_positive_float(self.cma_config, "min_sigma", 1e-6)
         self.max_sigma = _resolve_optional_positive_float(self.cma_config, "max_sigma")
         self.min_eigenvalue = _resolve_positive_float(self.cma_config, "min_eigenvalue", 1e-8)
-        self.jitter = _resolve_positive_float(self.cma_config, "jitter", 1e-10)
         self.layers: dict[str, LayerCMAState] = {}
         for name, shape in self.layer_shapes.items():
             dim = math.prod(shape)
-            cov = torch.eye(dim, dtype=self.dtype, device=self.device)
-            chol = torch.eye(dim, dtype=self.dtype, device=self.device)
             self.layers[name] = LayerCMAState(
                 sigma=torch.tensor(float(self.initial_sigma), dtype=self.dtype, device=self.device),
-                cov=cov,
-                chol=chol,
+                cov_diag=torch.ones(dim, dtype=self.dtype, device=self.device),
                 p_sigma=torch.zeros(dim, dtype=self.dtype, device=self.device),
                 p_c=torch.zeros(dim, dtype=self.dtype, device=self.device),
             )
@@ -129,14 +92,12 @@ class PerLayerCMAES:
                 "min_sigma": self.min_sigma,
                 "max_sigma": self.max_sigma,
                 "min_eigenvalue": self.min_eigenvalue,
-                "jitter": self.jitter,
                 "initial_sigma": self.initial_sigma,
             },
             "layers": {
                 name: {
                     "sigma": layer.sigma.detach().cpu().clone(),
-                    "cov": layer.cov.detach().cpu().clone(),
-                    "chol": layer.chol.detach().cpu().clone(),
+                    "cov_diag": layer.cov_diag.detach().cpu().clone(),
                     "p_sigma": layer.p_sigma.detach().cpu().clone(),
                     "p_c": layer.p_c.detach().cpu().clone(),
                     "generation": int(layer.generation),
@@ -152,15 +113,17 @@ class PerLayerCMAES:
                 continue
             layer = self.layers[name]
             layer.sigma = state["sigma"].to(device=self.device, dtype=self.dtype)
-            layer.cov = state["cov"].to(device=self.device, dtype=self.dtype)
-            layer.chol = state["chol"].to(device=self.device, dtype=self.dtype)
+            cov_diag = state.get("cov_diag")
+            if cov_diag is None:
+                raise ValueError("diagonal CMA checkpoint is missing cov_diag")
+            layer.cov_diag = cov_diag.to(device=self.device, dtype=self.dtype)
             layer.p_sigma = state["p_sigma"].to(device=self.device, dtype=self.dtype)
             layer.p_c = state["p_c"].to(device=self.device, dtype=self.dtype)
             layer.generation = int(state.get("generation", 0))
 
     def sample_noise(self, num_mutants: int, *, antithetic: bool = True) -> dict[str, dict[str, torch.Tensor]]:
         if antithetic and num_mutants % 2 != 0:
-            raise ValueError("per-layer CMA-ES with antithetic sampling requires an even num_mutants")
+            raise ValueError("per-layer diagonal CMA-ES with antithetic sampling requires an even num_mutants")
         if num_mutants <= 0:
             raise ValueError("num_mutants must be positive")
 
@@ -174,10 +137,11 @@ class PerLayerCMAES:
                 z = torch.cat([z_base, -z_base], dim=0)
             else:
                 z = torch.randn((num_mutants, dim), dtype=self.dtype, device=self.device)
-            transformed = z @ layer.chol.transpose(0, 1)
+            transformed = z * torch.sqrt(torch.clamp_min(layer.cov_diag, self.min_eigenvalue)).unsqueeze(0)
             noise_payloads[name] = {
                 "m": transformed.reshape(num_mutants, *shape).contiguous(),
                 "m_z": z.reshape(num_mutants, *shape).contiguous(),
+                "sigma": layer.sigma.detach().clone(),
             }
         return noise_payloads
 
@@ -194,7 +158,7 @@ class PerLayerCMAES:
         rewards = rewards.float()
         population_size = rewards.numel()
         if population_size <= 0:
-            raise ValueError("per-layer CMA-ES requires at least one reward")
+            raise ValueError("per-layer diagonal CMA-ES requires at least one reward")
         sorted_indices = torch.argsort(rewards, descending=True)
         weights = _standard_recombination_weights(population_size, selection_ratio=self.selection_ratio)
         mu = weights.numel()
@@ -263,14 +227,11 @@ class PerLayerCMAES:
             h_sigma = 1.0 if sigma_norm / norm_denom < h_sigma_threshold else 0.0
             hsigma_flags.append(h_sigma)
             p_c = (1.0 - c_c) * layer.p_c + h_sigma * math.sqrt(c_c * (2.0 - c_c) * mu_eff) * scaled_y_w
-            rank_mu_update = (y_top.transpose(0, 1) * weight_device) @ y_top
             retained = 1.0 - c1 - c_mu + (1.0 - h_sigma) * c1 * c_c * (2.0 - c_c)
-            updated_cov = retained * layer.cov + c1 * torch.outer(p_c, p_c) + c_mu * rank_mu_update
-            updated_cov, updated_chol = _factorize_spd(
-                updated_cov,
-                min_eigenvalue=self.min_eigenvalue,
-                jitter=self.jitter,
-            )
+            rank_mu_update_diag = torch.sum((y_top**2) * weight_device.unsqueeze(1), dim=0)
+            updated_cov_diag = retained * layer.cov_diag + c1 * (p_c**2) + c_mu * rank_mu_update_diag
+            updated_cov_diag = torch.clamp_min(updated_cov_diag, self.min_eigenvalue)
+            cov_trace = float(updated_cov_diag.sum().item())
             sigma_scale = math.exp((c_sigma / d_sigma) * (sigma_norm / chi_n - 1.0))
             new_sigma = float(layer.sigma.item()) * sigma_scale
             new_sigma = max(new_sigma, self.min_sigma)
@@ -279,12 +240,11 @@ class PerLayerCMAES:
 
             layer.p_sigma = p_sigma
             layer.p_c = p_c
-            layer.cov = updated_cov
-            layer.chol = updated_chol
+            layer.cov_diag = updated_cov_diag
             layer.sigma = torch.tensor(new_sigma, dtype=self.dtype, device=self.device)
             layer.generation = generation
             sigma_values.append(new_sigma)
-            cov_traces.append(float(torch.trace(updated_cov).item()))
+            cov_traces.append(cov_trace)
 
         direction_stats = {
             "cma_selected_reward_mean": selected_reward_mean,

@@ -38,11 +38,16 @@ from eval.health import summarize_single_mutant_result
 from eval.val_runner import write_json, write_jsonl
 from models.base_loader import load_causal_lm, load_tokenizer, resolve_dtype
 from models.layer_selector import select_target_layers
-from models.spectral_vllm import build_vllm_spectral_state, cleanup_cpu_model
+from models.spectral_vllm import (
+    PARAMETERIZATION_FULL_FACTORIZED_M,
+    build_vllm_spectral_state,
+    cleanup_cpu_model,
+)
 from models.svd_cache import load_or_create_svd_cache, resolve_svd_cache_path
 
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+CMA_UPDATE_RULES = {"per_layer_diagonal_cma_es"}
 
 
 def _patch_transformers_tokenizer_compat() -> None:
@@ -143,7 +148,7 @@ class DistributedVLLMSpectralESTrainer:
         self.tokenizer = load_tokenizer(config["model"]["model_path"])
 
         dataset = ensure_processed_dataset(
-            raw_path=config["data"]["cache_dir"],
+            raw_path=config["data"]["raw_dir"],
             processed_path=config["data"]["processed_dir"],
             split_seed=int(config["data"]["split_seed"]),
             val_size=int(config["data"].get("val_size", 0)),
@@ -195,7 +200,7 @@ class DistributedVLLMSpectralESTrainer:
         cache_path, cache_payload = load_or_create_svd_cache(
             model_path=config["model"]["model_path"],
             selections=selections,
-            rank=int(config["subspace"]["rank"]),
+            rank=self._resolved_svd_rank(),
             band_strategy=config["subspace"]["band_strategy"],
             cache_dir=config["subspace"]["cache_dir"],
             device="cpu",
@@ -208,10 +213,12 @@ class DistributedVLLMSpectralESTrainer:
             algorithm_name=config["algorithm"]["name"],
             selections=selections,
             cache_payload=cache_payload,
+            subspace_config=config.get("subspace", {}),
         )
-        update_rule = config.get("es", {}).get("update_rule", "pairwise_directional")
+        config["subspace"]["effective_adapter_rank"] = int(self.state.export_rank)
+        update_rule = config.get("es", {}).get("update_rule", "per_layer_diagonal_cma_es")
         self.cma_state: PerLayerCMAES | None = None
-        if update_rule == "per_layer_cma_es":
+        if update_rule in CMA_UPDATE_RULES:
             self.cma_state = PerLayerCMAES(
                 layer_shapes={name: adapter.m_state.shape for name, adapter in self.state.adapters.items()},
                 sigma_config=config["es"]["sigma"],
@@ -230,7 +237,7 @@ class DistributedVLLMSpectralESTrainer:
             "enable_lora": True,
             "tensor_parallel_size": 1,
             "distributed_executor_backend": "external_launcher",
-            "max_lora_rank": self.spectral_rank,
+            "max_lora_rank": max(int(self.state.export_rank), 1),
             "max_loras": int(vllm_config.get("max_loras", config["execution"]["mutant_chunk_size"])),
             "max_cpu_loras": int(vllm_config.get("max_cpu_loras", config["execution"]["mutant_chunk_size"] * 2)),
             "gpu_memory_utilization": float(vllm_config.get("gpu_memory_utilization", 0.85)),
@@ -251,6 +258,9 @@ class DistributedVLLMSpectralESTrainer:
             model_path=config["model"]["model_path"],
             max_new_tokens=int(config["generation"]["max_new_tokens"]),
             temperature=float(config["generation"].get("temperature", 0.0)),
+            top_p=float(config["generation"].get("top_p", 1.0)),
+            top_k=int(config["generation"].get("top_k", -1)),
+            presence_penalty=float(config["generation"].get("presence_penalty", 0.0)),
             mutant_chunk_size=int(config["execution"]["mutant_chunk_size"]),
             adapter_root=self.adapter_root,
             rank=self.rank,
@@ -270,7 +280,9 @@ class DistributedVLLMSpectralESTrainer:
                     "val_examples": len(self.val_records),
                     "test_examples": len(self.test_records),
                     "svd_cache_path": str(self.svd_cache_path),
+                    "parameterization": str(config.get("subspace", {}).get("parameterization", "spectral_dense")),
                     "spectral_rank": self.spectral_rank,
+                    "adapter_rank": int(self.state.export_rank),
                     "world_size": self.world_size,
                     "mutants_per_worker": self.mutants_per_worker,
                 },
@@ -292,9 +304,17 @@ class DistributedVLLMSpectralESTrainer:
         )
         dist.barrier()
 
+    def _parameterization(self) -> str:
+        return str(self.config.get("subspace", {}).get("parameterization", "spectral_dense")).strip().lower()
+
+    def _resolved_svd_rank(self) -> int:
+        if self._parameterization() == PARAMETERIZATION_FULL_FACTORIZED_M:
+            return 0
+        return int(self.config["subspace"]["rank"])
+
     def _ensure_svd_cache_ready_on_gpu(self) -> None:
         model_path = self.config["model"]["model_path"]
-        svd_rank = int(self.config["subspace"]["rank"])
+        svd_rank = self._resolved_svd_rank()
         band_strategy = self.config["subspace"]["band_strategy"]
         cache_dir = self.config["subspace"]["cache_dir"]
         svd_dtype = resolve_dtype(self.config["model"].get("svd_dtype", "float32"))
@@ -387,13 +407,13 @@ class DistributedVLLMSpectralESTrainer:
         if distributed_mode != "mutant_parallel":
             raise ValueError(f"expected execution.distributed_mode=mutant_parallel, got {distributed_mode}")
         es_config = self.config.get("es", {})
-        antithetic = bool(es_config.get("antithetic", True))
-        update_rule = es_config.get("update_rule", "pairwise_directional")
+        antithetic = bool(es_config.get("antithetic", False))
+        update_rule = es_config.get("update_rule", "per_layer_diagonal_cma_es")
         if antithetic and self.current_k % 2 != 0:
             raise ValueError("num_mutants must be even for antithetic sampling")
         if update_rule == "pairwise_directional" and not antithetic:
             raise ValueError("pairwise_directional requires es.antithetic=true")
-        if update_rule not in {"pairwise_directional", "gaussian_mean", "per_layer_cma_es"}:
+        if update_rule not in {"pairwise_directional", "gaussian_mean", *CMA_UPDATE_RULES}:
             raise ValueError(f"unsupported es.update_rule: {update_rule}")
         if execution_config.get("backend", self.config.get("execution", {}).get("backend")) == "hf":
             raise ValueError("DistributedVLLMSpectralESTrainer only supports the vllm backend")
@@ -437,6 +457,32 @@ class DistributedVLLMSpectralESTrainer:
         self.wandb_run.define_metric("trainer/global_step")
         self.wandb_run.define_metric("*", step_metric="trainer/global_step")
 
+    @staticmethod
+    def _wandb_split_name(split: str) -> str:
+        return "valid" if split == "val" else split
+
+    @staticmethod
+    def _merge_benchmark_metrics(gathered_payloads: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+        merged: dict[str, dict[str, float]] = {}
+        for item in gathered_payloads:
+            for benchmark_name, stats in item.get("benchmark_metrics", {}).items():
+                bucket = merged.setdefault(
+                    benchmark_name,
+                    {"num_examples": 0.0, "reward_sum": 0.0, "exact_match_sum": 0.0},
+                )
+                bucket["num_examples"] += float(stats.get("num_examples", 0.0))
+                bucket["reward_sum"] += float(stats.get("reward_sum", 0.0))
+                bucket["exact_match_sum"] += float(stats.get("exact_match_sum", 0.0))
+        finalized: dict[str, dict[str, float]] = {}
+        for benchmark_name in sorted(merged):
+            num_examples = max(float(merged[benchmark_name]["num_examples"]), 1.0)
+            finalized[benchmark_name] = {
+                "num_examples": float(merged[benchmark_name]["num_examples"]),
+                "accuracy": float(merged[benchmark_name]["exact_match_sum"]) / num_examples,
+                "reward_mean": float(merged[benchmark_name]["reward_sum"]) / num_examples,
+            }
+        return finalized
+
     def _to_wandb_metrics(self, tag: str, payload: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any]]:
         if tag == "TRAIN_STEP":
             metrics = {f"train/{key}": value for key, value in payload.items() if isinstance(value, (int, float))}
@@ -444,15 +490,32 @@ class DistributedVLLMSpectralESTrainer:
             return metrics, {"trainer/tag": tag}
         if tag in {"VAL_ACCURACY", "EVAL_DONE"}:
             split = payload.get("split", "val")
+            split_key = self._wandb_split_name(str(split))
             metrics = {
-                f"{split}/accuracy": float(payload["accuracy"]),
-                f"{split}/num_examples": float(payload["num_examples"]),
+                f"{split_key}/accuracy": float(payload["accuracy"]),
+                f"{split_key}/num_examples": float(payload["num_examples"]),
+                f"{split_key}/reward_mean": float(payload.get("reward_mean", 0.0)),
                 "trainer/global_step": float(payload["step"]),
             }
+            for benchmark_name, stats in payload.get("benchmark_metrics", {}).items():
+                metrics[f"{split_key}/{benchmark_name}/accuracy"] = float(stats["accuracy"])
+                metrics[f"{split_key}/{benchmark_name}/num_examples"] = float(stats["num_examples"])
+                metrics[f"{split_key}/{benchmark_name}/reward_mean"] = float(stats["reward_mean"])
             return metrics, {"trainer/tag": tag, "trainer/split": split}
         if tag == "BASELINE_DONE":
             split = payload.get("split", "baseline")
-            return {f"baseline/{split}_accuracy": float(payload["accuracy"])}, {"trainer/tag": tag}
+            split_key = self._wandb_split_name(str(split))
+            metrics = {
+                f"baseline/{split_key}/accuracy": float(payload["accuracy"]),
+                f"baseline/{split_key}/num_examples": float(payload.get("num_examples", 0.0)),
+                f"baseline/{split_key}/reward_mean": float(payload.get("reward_mean", 0.0)),
+                "trainer/global_step": float(payload.get("step", 0.0)),
+            }
+            for benchmark_name, stats in payload.get("benchmark_metrics", {}).items():
+                metrics[f"baseline/{split_key}/{benchmark_name}/accuracy"] = float(stats["accuracy"])
+                metrics[f"baseline/{split_key}/{benchmark_name}/num_examples"] = float(stats["num_examples"])
+                metrics[f"baseline/{split_key}/{benchmark_name}/reward_mean"] = float(stats["reward_mean"])
+            return metrics, {"trainer/tag": tag}
         if tag == "DATA_READY":
             metrics = {
                 **{f"data/{key}": float(value) for key, value in payload.items() if isinstance(value, (int, float))},
@@ -588,10 +651,12 @@ class DistributedVLLMSpectralESTrainer:
         mutant_evals_total = sum(float(item["profiler_snapshot"].get("mutant_evals_total", 0.0)) for item in gathered_payloads)
 
         total_examples = max(total_examples, 1)
+        benchmark_metrics = self._merge_benchmark_metrics(gathered_payloads)
         summary = {
             "num_examples": total_examples,
             "accuracy": exact_match_sum / total_examples,
             "reward_mean": reward_sum / total_examples,
+            "benchmark_metrics": benchmark_metrics,
             "profiler": {
                 "elapsed_seconds": elapsed_seconds,
                 "generated_tokens_total": generated_tokens_total,
@@ -614,7 +679,14 @@ class DistributedVLLMSpectralESTrainer:
 
         self.log_event(
             "VAL_ACCURACY" if split == "val" else "EVAL_DONE",
-            {"split": split, "step": step, "accuracy": summary["accuracy"], "num_examples": summary["num_examples"]},
+            {
+                "split": split,
+                "step": step,
+                "accuracy": summary["accuracy"],
+                "reward_mean": summary["reward_mean"],
+                "num_examples": summary["num_examples"],
+                "benchmark_metrics": benchmark_metrics,
+            },
         )
         return summary
 
@@ -638,6 +710,7 @@ class DistributedVLLMSpectralESTrainer:
             "exact_match_sum": float(result.exact_match_rates[0].item()) * local_count if result.exact_match_rates.numel() else 0.0,
             "profiler_snapshot": result.profiler_snapshot,
             "predictions": result.predictions,
+            "benchmark_metrics": result.benchmark_metrics,
         }
         gathered_payloads: list[dict[str, Any] | None] = [None] * self.world_size
         dist.all_gather_object(gathered_payloads, local_payload)
@@ -658,7 +731,17 @@ class DistributedVLLMSpectralESTrainer:
                 {"split": split, "max_examples": max_examples if max_examples > 0 else len(self._select_records(split))},
             )
             summary = self._evaluate_split(split=split, step=0, max_examples=max_examples, output_dir=output_root)
-            self.log_event("BASELINE_DONE", {"split": split, "accuracy": summary["accuracy"]})
+            self.log_event(
+                "BASELINE_DONE",
+                {
+                    "split": split,
+                    "step": 0,
+                    "accuracy": summary["accuracy"],
+                    "reward_mean": summary["reward_mean"],
+                    "num_examples": summary["num_examples"],
+                    "benchmark_metrics": summary.get("benchmark_metrics", {}),
+                },
+            )
         else:
             summary = {}
         dist.barrier()
@@ -684,11 +767,11 @@ class DistributedVLLMSpectralESTrainer:
 
     def _sample_noise(self, current_k: int) -> dict[str, dict[str, torch.Tensor]]:
         if self.is_main_process:
-            antithetic = bool(self.config.get("es", {}).get("antithetic", True))
-            update_rule = self.config.get("es", {}).get("update_rule", "pairwise_directional")
-            if update_rule == "per_layer_cma_es":
+            antithetic = bool(self.config.get("es", {}).get("antithetic", False))
+            update_rule = self.config.get("es", {}).get("update_rule", "per_layer_diagonal_cma_es")
+            if update_rule in CMA_UPDATE_RULES:
                 if self.cma_state is None:
-                    raise RuntimeError("per_layer_cma_es requires CMA state to be initialized")
+                    raise RuntimeError(f"{update_rule} requires CMA state to be initialized")
                 noise_payloads = self.cma_state.sample_noise(current_k, antithetic=antithetic)
             else:
                 noise_payloads = self.state.sample_noise(current_k, antithetic=antithetic)
@@ -782,7 +865,7 @@ class DistributedVLLMSpectralESTrainer:
                 shards=ordered_shards,
                 shard_rewards=[list(item["exact_match_rates"]) for item in ordered_payloads],
             )
-            update_rule = self.config.get("es", {}).get("update_rule", "pairwise_directional")
+            update_rule = self.config.get("es", {}).get("update_rule", "per_layer_diagonal_cma_es")
             if update_rule == "pairwise_directional":
                 direction_payloads, direction_stats = compute_pairwise_direction_payloads(
                     noise_payloads=noise_payloads,
@@ -803,9 +886,9 @@ class DistributedVLLMSpectralESTrainer:
                     sigma_config=self.config["es"]["sigma"],
                     max_layer_step_config=trust_region.get("max_layer_step_norm"),
                 )
-            elif update_rule == "per_layer_cma_es":
+            elif update_rule in CMA_UPDATE_RULES:
                 if self.cma_state is None:
-                    raise RuntimeError("per_layer_cma_es requires CMA state to be initialized")
+                    raise RuntimeError(f"{update_rule} requires CMA state to be initialized")
                 trust_region = self.config.get("es", {}).get("trust_region", {})
                 max_state_norm = None
                 if "max_state_norm" in trust_region:
@@ -893,7 +976,17 @@ class DistributedVLLMSpectralESTrainer:
                 output_dir=self._resolve_eval_output_dir(split=eval_split, step=0),
             )
             if self.is_main_process:
-                self.log_event("BASELINE_DONE", {"split": eval_split, "accuracy": best_summary["accuracy"]})
+                self.log_event(
+                    "BASELINE_DONE",
+                    {
+                        "split": eval_split,
+                        "step": 0,
+                        "accuracy": best_summary["accuracy"],
+                        "reward_mean": best_summary["reward_mean"],
+                        "num_examples": best_summary["num_examples"],
+                        "benchmark_metrics": best_summary.get("benchmark_metrics", {}),
+                    },
+                )
                 best_val_accuracy = best_summary["accuracy"]
             else:
                 best_val_accuracy = float("-inf")
@@ -904,6 +997,14 @@ class DistributedVLLMSpectralESTrainer:
 
         for step in range(1, int(self.config["train"]["train_steps"]) + 1):
             self._train_one_step(step=step, current_k=current_k, current_micro_batch=current_micro_batch)
+            if self.is_main_process:
+                self._save_checkpoint(
+                    step=step,
+                    best_val_accuracy=best_val_accuracy,
+                    name=f"step_{step:04d}",
+                    current_k=current_k,
+                    current_micro_batch=current_micro_batch,
+                )
             if step % int(self.config["eval"]["eval_every_steps"]) == 0 or step == int(self.config["train"]["train_steps"]):
                 dist.barrier()
                 summary = self._evaluate_split(

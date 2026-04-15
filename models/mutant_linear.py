@@ -17,7 +17,7 @@ class AdapterLayerBase(nn.Module, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def activate_mutants(self, noise_bundle: dict[str, torch.Tensor], sigma_config: Any) -> None:
+    def activate_mutants(self, noise_bundle: dict[str, Any], sigma_config: Any) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -54,6 +54,26 @@ class AdapterLayerBase(nn.Module, ABC):
         *,
         max_state_norm: float | None = None,
     ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_trainable_state(self) -> dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_trainable_state(self, payload: dict[str, torch.Tensor]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_lora_weights(self, *, active_index: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_lora_rank(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def effective_matrix(self) -> torch.Tensor | None:
         raise NotImplementedError
 
 

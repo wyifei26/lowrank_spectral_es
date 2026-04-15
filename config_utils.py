@@ -8,11 +8,19 @@ from typing import Any
 import yaml
 
 
-def load_yaml_config(path: str | Path) -> dict[str, Any]:
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def load_raw_yaml_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle)
     if not isinstance(payload, dict):
         raise TypeError(f"expected dict config in {path}, got {type(payload)}")
+    return payload
+
+
+def load_yaml_config(path: str | Path) -> dict[str, Any]:
+    payload = load_raw_yaml_config(path)
     return normalize_config(payload)
 
 
@@ -49,8 +57,47 @@ def apply_overrides(config: dict[str, Any], overrides: list[str]) -> dict[str, A
 
 def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(config)
+    _normalize_data_dirs(normalized)
     _normalize_layer_blocks(normalized)
     return normalized
+
+
+def _normalize_data_dirs(config: dict[str, Any]) -> None:
+    data = config.get("data")
+    if not isinstance(data, dict):
+        return
+
+    source = str(data.get("source") or "gsm8k").strip().replace("-", "_")
+    default_root = PROJECT_ROOT / "dataset" / source
+
+    root_dir_raw = data.get("root_dir")
+    raw_dir_raw = data.get("raw_dir") or data.get("cache_dir")
+    processed_dir_raw = data.get("processed_dir")
+    processed_exports_dir_raw = data.get("processed_exports_dir")
+    manifest_path_raw = data.get("manifest_path")
+
+    if root_dir_raw:
+        root_dir = Path(root_dir_raw)
+    elif raw_dir_raw:
+        root_dir = Path(raw_dir_raw).parent
+    elif processed_dir_raw:
+        root_dir = Path(processed_dir_raw).parent
+    else:
+        root_dir = default_root
+
+    raw_dir = Path(raw_dir_raw) if raw_dir_raw else root_dir / "raw"
+    processed_dir = Path(processed_dir_raw) if processed_dir_raw else root_dir / "processed"
+    processed_exports_dir = (
+        Path(processed_exports_dir_raw) if processed_exports_dir_raw else root_dir / "processed_exports"
+    )
+    manifest_path = Path(manifest_path_raw) if manifest_path_raw else root_dir / "manifest.json"
+
+    data["root_dir"] = str(root_dir)
+    data["raw_dir"] = str(raw_dir)
+    data["cache_dir"] = str(raw_dir)
+    data["processed_dir"] = str(processed_dir)
+    data["processed_exports_dir"] = str(processed_exports_dir)
+    data["manifest_path"] = str(manifest_path)
 
 
 def _normalize_layer_blocks(config: dict[str, Any]) -> None:

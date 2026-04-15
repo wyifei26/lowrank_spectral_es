@@ -9,6 +9,21 @@ from datasets import Dataset
 
 
 _DEFAULT_SOURCE = "gsm8k"
+_BENCHMARK_ALIASES = {
+    "gsm8k": "gsm8k",
+    "mmlu_pro": "mmlu-pro",
+    "math500": "math500",
+    "olympiadbench": "olympiadbench",
+    "minerva": "minerva",
+    "amc23": "amc23",
+    "aime2024": "aime2024",
+    "aime2025": "aime2025",
+    "idavidrein/gpqa": "gpqa",
+    "gpqa": "gpqa",
+    "digitallearninggmbh/math_lighteval": "math-lighteval",
+    "math_lighteval": "math-lighteval",
+    "dapo_math_17k": "dapo-math-17k",
+}
 
 
 @contextmanager
@@ -23,6 +38,19 @@ def temporarily_unset_proxy_env() -> Iterator[None]:
 
 def normalize_source(source: str | None) -> str:
     return str(source or _DEFAULT_SOURCE).strip().replace("-", "_").lower()
+
+
+def canonical_benchmark_name(source: str | None, default: str = _DEFAULT_SOURCE) -> str:
+    raw_source = str(source or default).strip()
+    normalized = normalize_source(raw_source)
+    if normalized in _BENCHMARK_ALIASES:
+        return _BENCHMARK_ALIASES[normalized]
+    if "/" in raw_source:
+        suffix = normalize_source(raw_source.rsplit("/", 1)[-1])
+        if suffix in _BENCHMARK_ALIASES:
+            return _BENCHMARK_ALIASES[suffix]
+        return suffix
+    return normalized
 
 
 def apply_chat_template_to_prompt(
@@ -71,6 +99,17 @@ def load_records(dataset: Dataset, max_examples: int = 0) -> list[dict]:
     if max_examples and max_examples > 0:
         dataset = dataset.select(range(min(max_examples, len(dataset))))
     return [dataset[idx] for idx in range(len(dataset))]
+
+
+def export_split_datasets(
+    split_datasets: dict[str, Dataset],
+    *,
+    export_dir: str | os.PathLike[str],
+) -> None:
+    export_root = os.fspath(export_dir)
+    os.makedirs(export_root, exist_ok=True)
+    for split_name, dataset in split_datasets.items():
+        dataset.to_parquet(os.path.join(export_root, f"{split_name}.parquet"))
 
 
 def allocate_split_counts(group_sizes: dict[str, int], target_total: int) -> dict[str, int]:

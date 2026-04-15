@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from config_utils import apply_overrides, load_yaml_config
+from config_utils import apply_overrides, load_raw_yaml_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = apply_overrides(load_yaml_config(args.config), args.override)
+    config = apply_overrides(load_raw_yaml_config(args.config), args.override)
     trainer = None
     try:
         algorithm_name = config.get("algorithm", {}).get("name")

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from datasets import Dataset, DatasetDict, load_from_disk
 
+from data.common import export_split_datasets
 from eval.gsm8k_reward import extract_gold_value
 
 
@@ -90,7 +91,7 @@ def ensure_processed_dataset(
 ) -> DatasetDict:
     del split_seed, val_size
     processed_path = Path(processed_path)
-    if processed_path.exists():
+    if (processed_path / "dataset_dict.json").exists():
         dataset = load_from_disk(str(processed_path))
         if not isinstance(dataset, DatasetDict):
             raise TypeError(f"expected DatasetDict at {processed_path}, got {type(dataset)}")
@@ -106,4 +107,5 @@ def ensure_processed_dataset(
     )
     processed_path.parent.mkdir(parents=True, exist_ok=True)
     processed.save_to_disk(str(processed_path))
+    export_split_datasets(dict(processed), export_dir=processed_path.parent / "processed_exports")
     return processed

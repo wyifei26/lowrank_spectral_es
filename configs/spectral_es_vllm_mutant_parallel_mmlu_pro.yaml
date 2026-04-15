@@ -7,8 +7,7 @@ model:
   svd_dtype: float32
 data:
   source: mmlu_pro
-  cache_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_raw
-  processed_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_processed
+  root_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro
   raw_splits: [validation, test]
   split_seed: 42
   train_ratio: 0.8
@@ -29,13 +28,16 @@ layers:
   target_blocks: all-blocks
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 subspace:
+  parameterization: spectral_dense
   rank: 32
   band_strategy: top-band
+  factor_rank: 8
+  factor_init_scale: 0.01
   cache_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/svd_cache
 es:
   num_mutants: 64
-  update_rule: pairwise_directional
-  antithetic: true
+  update_rule: per_layer_diagonal_cma_es
+  antithetic: false
   sigma:
     m: 0.01
   alpha:
@@ -46,7 +48,6 @@ es:
     min_sigma: 1.0e-6
     max_sigma: 0.1
     min_eigenvalue: 1.0e-8
-    jitter: 1.0e-10
 reward:
   exact_match: 1.0
 train:

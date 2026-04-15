@@ -5,7 +5,7 @@ from typing import Sequence
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
-from data.common import split_dataset_three_way, temporarily_unset_proxy_env
+from data.common import export_split_datasets, split_dataset_three_way, temporarily_unset_proxy_env
 from eval.mmlu_pro_reward import extract_gold_choice
 
 
@@ -76,7 +76,7 @@ def process_split(split: Dataset, split_name: str) -> Dataset:
 
 def ensure_raw_dataset(raw_path: str | Path) -> DatasetDict:
     raw_path = Path(raw_path)
-    if raw_path.exists():
+    if (raw_path / "dataset_dict.json").exists():
         dataset = load_from_disk(str(raw_path))
         if not isinstance(dataset, DatasetDict):
             raise TypeError(f"expected DatasetDict at {raw_path}, got {type(dataset)}")
@@ -102,7 +102,7 @@ def ensure_processed_dataset(
 ) -> DatasetDict:
     del val_size
     processed_path = Path(processed_path)
-    if processed_path.exists():
+    if (processed_path / "dataset_dict.json").exists():
         dataset = load_from_disk(str(processed_path))
         if not isinstance(dataset, DatasetDict):
             raise TypeError(f"expected DatasetDict at {processed_path}, got {type(dataset)}")
@@ -131,4 +131,5 @@ def ensure_processed_dataset(
     )
     processed_path.parent.mkdir(parents=True, exist_ok=True)
     processed.save_to_disk(str(processed_path))
+    export_split_datasets(dict(processed), export_dir=processed_path.parent / "processed_exports")
     return processed

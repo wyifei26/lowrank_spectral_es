@@ -8,31 +8,18 @@ from typing import Any
 import torch
 from safetensors.torch import save_file
 
-from es.updater import resolve_named_value
 from models.layer_selector import LayerSelection
-from models.spectral_es import SpectralAdapterLayer
+from models.spectral_es import FactorizedSpectralAdapterLayer, LoRAESAdapterLayer, SpectralAdapterLayer
 
 
-def _factorize_square_matrix(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"expected square matrix, got shape={tuple(matrix.shape)}")
-    u_m, s_m, vh_m = torch.linalg.svd(matrix.float(), full_matrices=False)
-    sqrt_s = torch.sqrt(torch.clamp_min(s_m, 0.0))
-    left = u_m * sqrt_s.unsqueeze(0)
-    right = sqrt_s.unsqueeze(1) * vh_m
-    return left.contiguous(), right.contiguous()
-
-
-def spectral_matrix_to_lora(
-    *,
-    u_basis: torch.Tensor,
-    vh_basis: torch.Tensor,
-    matrix: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    left, right = _factorize_square_matrix(matrix)
-    lora_b = (u_basis.float() @ left).contiguous()
-    lora_a = (right @ vh_basis.float()).contiguous()
-    return lora_a, lora_b
+PARAMETERIZATION_SPECTRAL_DENSE = "spectral_dense"
+PARAMETERIZATION_LORA_ES = "lora_es"
+PARAMETERIZATION_FULL_FACTORIZED_M = "full_factorized_m"
+SUPPORTED_PARAMETERIZATIONS = {
+    PARAMETERIZATION_SPECTRAL_DENSE,
+    PARAMETERIZATION_LORA_ES,
+    PARAMETERIZATION_FULL_FACTORIZED_M,
+}
 
 
 class SpectralVLLMState:
@@ -42,20 +29,56 @@ class SpectralVLLMState:
         algorithm_name: str,
         selections: list[LayerSelection],
         cache_payload: dict[str, dict[str, torch.Tensor]],
+        parameterization: str,
+        factor_rank: int | None = None,
+        factor_init_scale: float = 0.01,
     ) -> None:
         if algorithm_name != "spectral_es":
             raise ValueError(f"vLLM backend currently only supports spectral_es, got {algorithm_name}")
+        if parameterization not in SUPPORTED_PARAMETERIZATIONS:
+            raise ValueError(
+                f"unsupported subspace.parameterization: {parameterization}; "
+                f"expected one of {sorted(SUPPORTED_PARAMETERIZATIONS)}"
+            )
         self.algorithm_name = algorithm_name
         self.cache_payload = cache_payload
-        self.adapters: dict[str, SpectralAdapterLayer] = {}
+        self.parameterization = parameterization
+        self.factor_rank = factor_rank
+        self.factor_init_scale = float(factor_init_scale)
+        self.adapters: dict[str, SpectralAdapterLayer | FactorizedSpectralAdapterLayer | LoRAESAdapterLayer] = {}
         self.target_modules = sorted({selection.module_key for selection in selections})
+
         for selection in selections:
             cache_entry = cache_payload[selection.full_name]
-            self.adapters[selection.full_name] = SpectralAdapterLayer(
-                layer_name=selection.full_name,
-                u=cache_entry["u"].float(),
-                vh=cache_entry["vh"].float(),
-            )
+            if parameterization == PARAMETERIZATION_SPECTRAL_DENSE:
+                adapter = SpectralAdapterLayer(
+                    layer_name=selection.full_name,
+                    u=cache_entry["u"].float(),
+                    vh=cache_entry["vh"].float(),
+                )
+            elif parameterization == PARAMETERIZATION_FULL_FACTORIZED_M:
+                if factor_rank is None or int(factor_rank) <= 0:
+                    raise ValueError("full_factorized_m requires subspace.factor_rank > 0")
+                adapter = FactorizedSpectralAdapterLayer(
+                    layer_name=selection.full_name,
+                    u=cache_entry["u"].float(),
+                    vh=cache_entry["vh"].float(),
+                    factor_rank=int(factor_rank),
+                    init_scale=self.factor_init_scale,
+                )
+            else:
+                if factor_rank is None or int(factor_rank) <= 0:
+                    raise ValueError("lora_es requires subspace.factor_rank > 0")
+                adapter = LoRAESAdapterLayer(
+                    layer_name=selection.full_name,
+                    out_dim=int(selection.module.out_features),
+                    in_dim=int(selection.module.in_features),
+                    factor_rank=int(factor_rank),
+                    init_scale=self.factor_init_scale,
+                )
+            self.adapters[selection.full_name] = adapter
+
+        self.export_rank = max((adapter.export_lora_rank() for adapter in self.adapters.values()), default=0)
         self.activate_current_state()
 
     def activate_current_state(self) -> None:
@@ -89,14 +112,13 @@ class SpectralVLLMState:
             )
 
     def adapter_state_dict(self) -> dict[str, dict[str, torch.Tensor]]:
-        return {
-            name: {"m_state": adapter.m_state.detach().cpu().clone()}
-            for name, adapter in self.adapters.items()
-        }
+        return {name: adapter.export_trainable_state() for name, adapter in self.adapters.items()}
 
     def load_adapter_state_dict(self, payload: dict[str, dict[str, torch.Tensor]]) -> None:
         for name, state in payload.items():
-            self.adapters[name].m_state.copy_(state["m_state"].to(self.adapters[name].m_state.device))
+            if name not in self.adapters:
+                continue
+            self.adapters[name].load_trainable_state(state)
         self.activate_current_state()
 
     def adapter_norms(self) -> dict[str, float]:
@@ -110,16 +132,15 @@ class SpectralVLLMState:
     ) -> None:
         for name, adapter in self.adapters.items():
             bundle = step_payloads.get(name)
-            if not bundle or "m" not in bundle:
+            if not bundle:
                 continue
-            adapter.apply_step(bundle["m"], max_state_norm=max_state_norm)
+            adapter.apply_step_payload(bundle, max_state_norm=max_state_norm)
 
     def export_adapter(
         self,
         *,
         output_dir: str | Path,
         base_model_name_or_path: str,
-        rank: int,
         adapter_name: str,
         active_index: int | None = None,
         clean_dir: bool = True,
@@ -141,12 +162,7 @@ class SpectralVLLMState:
 
         state_dict: dict[str, torch.Tensor] = {}
         for full_name, adapter in self.adapters.items():
-            matrix = adapter.m_state if active_index is None else adapter.active_m[active_index]
-            lora_a, lora_b = spectral_matrix_to_lora(
-                u_basis=self.cache_payload[full_name]["u"],
-                vh_basis=self.cache_payload[full_name]["vh"],
-                matrix=matrix,
-            )
+            lora_a, lora_b = adapter.export_lora_weights(active_index=active_index)
             state_dict[f"base_model.model.{full_name}.lora_A.weight"] = lora_a.cpu()
             state_dict[f"base_model.model.{full_name}.lora_B.weight"] = lora_b.cpu()
 
@@ -156,10 +172,10 @@ class SpectralVLLMState:
             "bias": "none",
             "fan_in_fan_out": False,
             "inference_mode": True,
-            "lora_alpha": rank,
+            "lora_alpha": self.export_rank,
             "lora_dropout": 0.0,
             "peft_type": "LORA",
-            "r": rank,
+            "r": self.export_rank,
             "target_modules": self.target_modules,
             "task_type": "CAUSAL_LM",
             "adapter_name": adapter_name,
@@ -174,11 +190,20 @@ def build_vllm_spectral_state(
     algorithm_name: str,
     selections: list[LayerSelection],
     cache_payload: dict[str, dict[str, torch.Tensor]],
+    subspace_config: dict[str, Any] | None = None,
 ) -> SpectralVLLMState:
+    subspace_config = dict(subspace_config or {})
+    parameterization = str(subspace_config.get("parameterization", PARAMETERIZATION_SPECTRAL_DENSE)).strip().lower()
+    factor_rank_raw = subspace_config.get("factor_rank")
+    factor_rank = None if factor_rank_raw in (None, 0) else int(factor_rank_raw)
+    factor_init_scale = float(subspace_config.get("factor_init_scale", 0.01))
     return SpectralVLLMState(
         algorithm_name=algorithm_name,
         selections=selections,
         cache_payload=cache_payload,
+        parameterization=parameterization,
+        factor_rank=factor_rank,
+        factor_init_scale=factor_init_scale,
     )
 
 

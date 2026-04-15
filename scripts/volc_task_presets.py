@@ -19,6 +19,7 @@ OUTPUT_ROOT_DIR = PROJECT_DIR / "runs"
 WANDB_DIR = ROOT / "output" / "wandb"
 SVD_CACHE_DIR = PROJECT_DIR / "artifacts" / "svd_cache"
 VOLC_CONFIG_ROOT = ROOT / "volc" / "task-configs"
+DATASETS_DIR = PROJECT_DIR / "dataset"
 DEFAULT_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 GPU_FLAVORS = {
     1: "ml.pni2.3xlarge",
@@ -34,6 +35,7 @@ class DatasetPreset:
     key: str
     task_config_subdir: str
     base_config_path: str
+    max_new_tokens: int
     data_overrides: dict[str, Any]
     prompt_overrides: dict[str, Any]
     generation_overrides: dict[str, Any]
@@ -46,7 +48,6 @@ class DatasetPreset:
 class ModelPreset:
     key: str
     model_path: str
-    max_new_tokens: int
     thinking: bool
     num_mutants: int
     effective_question_batch: int
@@ -60,8 +61,6 @@ class ModelPreset:
 @dataclass(frozen=True)
 class ParamPreset:
     key: str
-    subspace_rank: int
-    alpha_m: float
     train_steps: int
     eval_every_steps: int
     eval_split: str
@@ -74,6 +73,11 @@ class ParamPreset:
     seed: int = 42
     trust_region_max_layer_step_norm_m: float = 0.0
     trust_region_max_state_norm_m: float = 0.0
+    cma_selection_ratio: float = 0.75
+    cma_mean_step_scale: float = 1.0
+    cma_min_sigma: float = 1.0e-6
+    cma_max_sigma: float = 0.02
+    cma_min_eigenvalue: float = 1.0e-8
     wandb_project: str = "lowrank-spectral-es-rl"
     notes_tag: str | None = None
     wandb_mode: str = "online"
@@ -81,11 +85,23 @@ class ParamPreset:
 
 
 @dataclass(frozen=True)
+class ParameterizationPreset:
+    key: str
+    parameterization: str
+    sigma_m: float
+    subspace_rank: int | None = None
+    factor_rank: int = 0
+    factor_init_scale: float = 0.001
+    label: str = ""
+    summary: str = ""
+
+
+@dataclass(frozen=True)
 class SamplingPreset:
     key: str
     update_rule: str
     antithetic: bool
-    sigma_m: float
+    alpha_m: float | None = None
     mechanism_label: str = ""
     mechanism_summary: str = ""
 
@@ -94,6 +110,7 @@ class SamplingPreset:
 class TaskSelection:
     dataset: DatasetPreset
     model: ModelPreset
+    parameterization: ParameterizationPreset
     params: ParamPreset
     sampling: SamplingPreset
     gpu_count: int
@@ -105,6 +122,7 @@ class TaskSelection:
 class ResolvedTaskConfig:
     dataset: DatasetPreset
     model: ModelPreset
+    parameterization: ParameterizationPreset
     params: ParamPreset
     sampling: SamplingPreset
     gpu_count: int
@@ -119,14 +137,39 @@ class ResolvedTaskConfig:
 
 
 DATASET_PRESETS: dict[str, DatasetPreset] = {
+    "math_data": DatasetPreset(
+        key="math_data",
+        task_config_subdir="math_data",
+        base_config_path="configs/spectral_es_vllm_mutant_parallel.yaml",
+        max_new_tokens=16000,
+        data_overrides={
+            "source": "math_data",
+            "root_dir": str(DATASETS_DIR / "math_data"),
+            "split_seed": 42,
+            "val_size": 748,
+        },
+        prompt_overrides={
+            "template_name": "math_boxed_v1",
+            "require_box_answer": True,
+            "use_chat_template": True,
+        },
+        generation_overrides={
+            "temperature": 0.0,
+        },
+        vllm_overrides={
+            "enforce_eager": True,
+        },
+        tags=("math_data",),
+        description_label="Math Data",
+    ),
     "gsm8k": DatasetPreset(
         key="gsm8k",
         task_config_subdir="gsm8k",
         base_config_path="configs/spectral_es_vllm_mutant_parallel.yaml",
+        max_new_tokens=2048,
         data_overrides={
             "source": "gsm8k",
-            "cache_dir": "/GenSIvePFS/users/yfwang/data/gsm8k/hf_main_full",
-            "processed_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/gsm8k_processed",
+            "root_dir": str(DATASETS_DIR / "gsm8k"),
             "split_seed": 42,
             "val_size": 748,
         },
@@ -148,10 +191,10 @@ DATASET_PRESETS: dict[str, DatasetPreset] = {
         key="mmlu_pro",
         task_config_subdir="mmlu_pro",
         base_config_path="configs/spectral_es_vllm_mutant_parallel_mmlu_pro.yaml",
+        max_new_tokens=4096,
         data_overrides={
             "source": "mmlu_pro",
-            "cache_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_raw",
-            "processed_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/mmlu_pro_processed",
+            "root_dir": str(DATASETS_DIR / "mmlu_pro"),
             "raw_splits": ["validation", "test"],
             "split_seed": 42,
             "train_ratio": 0.94,
@@ -180,41 +223,55 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     "qwen3_0p6b_base": ModelPreset(
         key="qwen3_0p6b_base",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B-Base",
-        max_new_tokens=4096,
         thinking=False,
         num_mutants=64,
         effective_question_batch=64,
-        eval_micro_batch=256,
+        eval_micro_batch=512,
         max_cpu_loras=32,
     ),
     "qwen3_0p6b_nothink": ModelPreset(
         key="qwen3_0p6b_nothink",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B",
-        max_new_tokens=2048,
         thinking=False,
         num_mutants=32,
         effective_question_batch=128,
-        eval_micro_batch=256,
+        eval_micro_batch=512,
         max_cpu_loras=32,
     ),
     "qwen3_0p6b_think": ModelPreset(
         key="qwen3_0p6b_think",
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-0.6B",
-        max_new_tokens=4096,
+        thinking=True,
+        num_mutants=64,
+        effective_question_batch=64,
+        eval_micro_batch=512,
+        max_cpu_loras=32,
+    ),
+    "qwen3_1p7b_base": ModelPreset(
+        key="qwen3_1p7b_base",
+        model_path="/GenSIvePFS/users/model/Qwen/Qwen3-1.7B-Base",
+        thinking=False,
+        num_mutants=64,
+        effective_question_batch=128,
+        eval_micro_batch=512,
+        max_cpu_loras=64,
+    ),
+    "qwen3_1p7b_base_rl": ModelPreset(
+        key="qwen3_1p7b_base_rl",
+        model_path="/GenSIvePFS/users/yfwang/code/verl/trajectories/verl_checkpoints/rl_recipe_qwen3_1p7b_base_gsm8k_4gpu_maxtok4096_temp0p6_topp0p9_e3_norsm_qwen3_1p7b_base_hf/global_step_65/actor/huggingface",
+        thinking=False,
+        num_mutants=64,
+        effective_question_batch=128,
+        eval_micro_batch=512,
+        max_cpu_loras=64,
+    ),
+    "qwen3_8b_base": ModelPreset(
+        key="qwen3_8b_base",
+        model_path="/GenSIvePFS/users/model/Qwen/Qwen3-8B-Base",
         thinking=True,
         num_mutants=64,
         effective_question_batch=64,
         eval_micro_batch=256,
-        max_cpu_loras=32,
-    ),
-    "qwen3_8b": ModelPreset(
-        key="qwen3_8b",
-        model_path="/GenSIvePFS/users/model/Qwen/Qwen3-8B",
-        max_new_tokens=4096,
-        thinking=True,
-        num_mutants=32,
-        effective_question_batch=64,
-        eval_micro_batch=128,
         max_cpu_loras=64,
     ),
 }
@@ -226,7 +283,7 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         key="pairwise",
         update_rule="pairwise_directional",
         antithetic=True,
-        sigma_m=0.01,
+        alpha_m=0.005,
         mechanism_label="Pairwise directional ES",
         mechanism_summary="antithetic mirrored ES with pairwise reward differences",
     ),
@@ -235,18 +292,46 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
         key="gaussian",
         update_rule="gaussian_mean",
         antithetic=False,
-        sigma_m=0.01,
+        alpha_m=0.005,
         mechanism_label="Gaussian mean ES",
         mechanism_summary="standard Gaussian ES using reward-weighted mean directions",
     ),
-    # 3) Per-layer CMA-ES with layerwise covariance and sigma adaptation.
+    # 3) Per-layer diagonal CMA-ES with layerwise variance and sigma adaptation.
     "cma": SamplingPreset(
         key="cma",
-        update_rule="per_layer_cma_es",
-        antithetic=True,
-        sigma_m=0.01,
-        mechanism_label="Per-layer CMA-ES",
-        mechanism_summary="layerwise covariance adaptation with optional antithetic latent sampling",
+        update_rule="per_layer_diagonal_cma_es",
+        antithetic=False,
+        alpha_m=None,
+        mechanism_label="Per-layer Diagonal CMA-ES",
+        mechanism_summary="layerwise diagonal covariance adaptation with optional antithetic latent sampling",
+    ),
+}
+
+
+PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
+    "spectral_dense": ParameterizationPreset(
+        key="spectral_dense",
+        parameterization="spectral_dense",
+        sigma_m=0.02,
+        subspace_rank=32,
+        label="Spectral dense M",
+        summary="truncated spectral basis with a dense in-basis matrix M",
+    ),
+    "lora_es": ParameterizationPreset(
+        key="lora_es",
+        parameterization="lora_es",
+        sigma_m=0.004,
+        factor_rank=8,
+        label="LoRA-ES",
+        summary="direct low-rank LoRA perturbation in weight space",
+    ),
+    "full_factorized_m": ParameterizationPreset(
+        key="full_factorized_m",
+        parameterization="full_factorized_m",
+        sigma_m=0.005,
+        factor_rank=8,
+        label="Full-basis factorized M",
+        summary="full spectral basis with factorized in-basis matrix M = P Q^T",
     ),
 }
 
@@ -254,9 +339,7 @@ SAMPLING_PRESETS: dict[str, SamplingPreset] = {
 PARAM_PRESETS: dict[str, ParamPreset] = {
     "default": ParamPreset(
         key="default",
-        subspace_rank=32,
-        alpha_m=0.005,
-        train_steps=500,
+        train_steps=300,
         eval_every_steps=5,
         eval_split="test",
         skip_initial_validation=False,
@@ -278,6 +361,7 @@ def resolve_task_selection(selection: TaskSelection) -> ResolvedTaskConfig:
     return ResolvedTaskConfig(
         dataset=selection.dataset,
         model=selection.model,
+        parameterization=selection.parameterization,
         params=selection.params,
         sampling=selection.sampling,
         gpu_count=gpu_count,
@@ -314,6 +398,20 @@ def target_blocks_tag(value: str | int | list[int]) -> str:
     raise TypeError(f"unsupported target_blocks value: {type(value)}")
 
 
+def basis_rank_tag(parameterization: ParameterizationPreset) -> str:
+    if parameterization.parameterization == "full_factorized_m":
+        return "fullbasis"
+    if parameterization.subspace_rank is None:
+        return ""
+    return f"r{parameterization.subspace_rank}"
+
+
+def factor_rank_tag(parameterization: ParameterizationPreset) -> str | None:
+    if parameterization.factor_rank <= 0:
+        return None
+    return f"fr{parameterization.factor_rank}"
+
+
 def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
     model_tag = Path(config.model.model_path).name.lower().replace(".", "p")
     thinking_tag = "thinking" if config.model.thinking else "nothinking"
@@ -326,16 +424,22 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
         sampling_tag,
         blocks_tag,
         "allmodules",
-        f"r{config.params.subspace_rank}",
+        config.parameterization.key,
         f"k{config.model.num_mutants}",
         f"q{config.model.effective_question_batch}",
         f"mb{config.train_micro_batch}",
         f"chunk{config.mutant_chunk_size}",
         f"{config.gpu_count}gpu",
-        f"sigma{str(config.sampling.sigma_m).replace('.', 'p')}",
+        f"sigma{str(config.parameterization.sigma_m).replace('.', 'p')}",
         model_tag,
         thinking_tag,
     ]
+    basis_tag = basis_rank_tag(config.parameterization)
+    if basis_tag:
+        suffix_parts.append(basis_tag)
+    factor_tag = factor_rank_tag(config.parameterization)
+    if factor_tag:
+        suffix_parts.append(factor_tag)
     if config.params.notes_tag:
         suffix_parts.append(config.params.notes_tag)
     return "_".join(suffix_parts)
@@ -344,10 +448,10 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
 def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
     generation_overrides = {
         **config.dataset.generation_overrides,
-        "max_new_tokens": config.model.max_new_tokens,
+        "max_new_tokens": config.dataset.max_new_tokens,
     }
     vllm_overrides = {
-        "max_model_len": config.model.max_new_tokens,
+        "max_model_len": config.dataset.max_new_tokens,
         **config.dataset.vllm_overrides,
     }
     overrides = [
@@ -364,8 +468,12 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"es.num_mutants={config.model.num_mutants}",
         f"es.update_rule={config.sampling.update_rule}",
         f"es.antithetic={format_override_value(config.sampling.antithetic)}",
-        f"es.alpha.m={config.params.alpha_m}",
-        f"es.sigma.m={config.sampling.sigma_m}",
+        f"es.sigma.m={config.parameterization.sigma_m}",
+        f"es.cma.selection_ratio={config.params.cma_selection_ratio}",
+        f"es.cma.mean_step_scale={config.params.cma_mean_step_scale}",
+        f"es.cma.min_sigma={config.params.cma_min_sigma}",
+        f"es.cma.max_sigma={config.params.cma_max_sigma}",
+        f"es.cma.min_eigenvalue={config.params.cma_min_eigenvalue}",
         f"es.trust_region.max_layer_step_norm.m={config.params.trust_region_max_layer_step_norm_m}",
         f"es.trust_region.max_state_norm.m={config.params.trust_region_max_state_norm_m}",
         f"reward.exact_match={config.params.reward_exact_match}",
@@ -376,7 +484,9 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"eval.eval_every_steps={config.params.eval_every_steps}",
         f"eval.skip_initial_validation={format_override_value(config.params.skip_initial_validation)}",
         f"eval.split={config.params.eval_split}",
-        f"subspace.rank={config.params.subspace_rank}",
+        f"subspace.parameterization={config.parameterization.parameterization}",
+        f"subspace.factor_rank={config.parameterization.factor_rank}",
+        f"subspace.factor_init_scale={config.parameterization.factor_init_scale}",
         f"subspace.band_strategy={config.params.band_strategy}",
         f"subspace.cache_dir={SVD_CACHE_DIR}",
         f"vllm.max_cpu_loras={config.model.max_cpu_loras}",
@@ -394,6 +504,10 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"wandb.dir={WANDB_DIR}",
         f"wandb.mode={config.params.wandb_mode}",
     ]
+    if config.sampling.alpha_m is not None:
+        overrides.append(f"es.alpha.m={config.sampling.alpha_m}")
+    if config.parameterization.subspace_rank is not None:
+        overrides.append(f"subspace.rank={config.parameterization.subspace_rank}")
     overrides.extend(_dict_to_overrides("data", config.dataset.data_overrides))
     overrides.extend(
         _dict_to_overrides(
@@ -410,8 +524,14 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         "mutant_parallel",
         model_name,
         f"{config.params.eval_split}_eval",
-        f"r{config.params.subspace_rank}",
+        config.parameterization.key,
     ]
+    basis_tag = basis_rank_tag(config.parameterization)
+    if basis_tag:
+        tags.append(basis_tag)
+    factor_tag = factor_rank_tag(config.parameterization)
+    if factor_tag:
+        tags.append(factor_tag)
     if config.params.notes_tag:
         tags.append(config.params.notes_tag)
     overrides.append(f"wandb.tags={format_override_value(tags)}")
@@ -425,8 +545,18 @@ def _dict_to_overrides(prefix: str, payload: dict[str, Any]) -> list[str]:
 def build_description(config: ResolvedTaskConfig) -> str:
     mechanism_label = config.sampling.mechanism_label or config.sampling.key
     mechanism_summary = config.sampling.mechanism_summary or config.sampling.update_rule
+    parameterization_label = config.parameterization.label or config.parameterization.key
+    parameterization_summary = config.parameterization.summary or config.parameterization.parameterization
+    rank_text = basis_rank_tag(config.parameterization)
+    factor_text = factor_rank_tag(config.parameterization)
+    if rank_text and factor_text:
+        rank_text = f"{rank_text}, {factor_text}"
+    elif factor_text:
+        rank_text = factor_text
+    basis_clause = f", basis={rank_text}" if rank_text else ""
     return (
-        f"{config.dataset.description_label} vLLM Spectral-ES run with rank {config.params.subspace_rank}, "
+        f"{config.dataset.description_label} vLLM Spectral-ES run with {parameterization_label} "
+        f"({parameterization_summary}){basis_clause}, "
         f"K={config.model.num_mutants}, q_batch={config.model.effective_question_batch}, "
         f"micro_batch={config.train_micro_batch}, chunk={config.mutant_chunk_size}, "
         f"sampling={mechanism_label} ({mechanism_summary}), eval split {config.params.eval_split}, "
@@ -539,6 +669,7 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
     preview = {
         "dataset": resolved.dataset.key,
         "model": resolved.model.key,
+        "parameterization": resolved.parameterization.key,
         "params": resolved.params.key,
         "sampling": resolved.sampling.key,
         "gpu_count": resolved.gpu_count,
@@ -554,13 +685,19 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "model_path": resolved.model.model_path,
         "num_mutants": resolved.model.num_mutants,
         "effective_question_batch": resolved.model.effective_question_batch,
-        "subspace_rank": resolved.params.subspace_rank,
-        "sigma_m": resolved.sampling.sigma_m,
-        "alpha_m": resolved.params.alpha_m,
+        "subspace_parameterization": resolved.parameterization.parameterization,
+        "subspace_factor_rank": resolved.parameterization.factor_rank,
+        "sigma_m": resolved.parameterization.sigma_m,
+        "cma_selection_ratio": resolved.params.cma_selection_ratio,
+        "cma_mean_step_scale": resolved.params.cma_mean_step_scale,
         "update_rule": resolved.sampling.update_rule,
         "antithetic": resolved.sampling.antithetic,
         "thinking": resolved.model.thinking,
         "target_blocks": resolved.params.target_blocks,
     }
+    if resolved.sampling.alpha_m is not None:
+        preview["alpha_m"] = resolved.sampling.alpha_m
+    if resolved.parameterization.subspace_rank is not None:
+        preview["subspace_rank"] = resolved.parameterization.subspace_rank
     print(yaml.safe_dump(preview, sort_keys=False), end="")
     return resolved, task_name, run_id, config_path, payload

@@ -7,9 +7,10 @@
 当前仓库只保留一条实际可运行的主线：
 
 - 算法：`spectral_es`
+- 参数化分支：`spectral_dense`、`lora_es`、`full_factorized_m`
 - 推理后端：`vLLM`
 - 并行方式：`single-node multi-GPU mutant-parallel`
-- 更新规则：`pairwise directional`、`gaussian_mean` 或 `per_layer_cma_es`
+- 更新规则：`pairwise directional`、`gaussian_mean` 或 `per_layer_diagonal_cma_es`
 - 约束：`standard alpha-over-sigma ES step + per-layer trust region`
 - 任务：`GSM8K`、`math_data`、`MMLU-Pro`
 - reward：
@@ -38,7 +39,7 @@ $$
 W_\ell \in \mathbb{R}^{d_{\text{out},\ell} \times d_{\text{in},\ell}}.
 $$
 
-### 2.1 截断谱子空间
+### 2.1 基座谱基
 
 对 $W_\ell$ 做 SVD：
 
@@ -52,14 +53,33 @@ $$
 - `middle-band`
 - `mixed-band`
 
-然后定义
+对于基于截断谱子空间的分支，定义
 
 $$
 U_{\ell,r} = U_\ell[:, I_\ell] \in \mathbb{R}^{d_{\text{out},\ell} \times r}, \qquad
 V_{\ell,r}^\top = V_\ell^\top[I_\ell, :] \in \mathbb{R}^{r \times d_{\text{in},\ell}}.
 $$
 
-当前可训练状态不是直接修改全矩阵 $W_\ell$，而是在这个低维谱子空间中维护一个小矩阵
+对于 `full_factorized_m` 分支，代码会直接使用完整谱基，即
+
+$$
+U_\ell \in \mathbb{R}^{d_{\text{out},\ell} \times r_{\max,\ell}}, \qquad
+V_\ell^\top \in \mathbb{R}^{r_{\max,\ell} \times d_{\text{in},\ell}},
+$$
+
+其中
+
+$$
+r_{\max,\ell} = \min(d_{\text{out},\ell}, d_{\text{in},\ell}).
+$$
+
+### 2.2 三种可训练参数化
+
+当前仓库有三种实际接通的参数化分支。它们共享同一个训练 / rollout / vLLM 挂载框架，但每层维护的可训练状态不同。
+
+#### 2.2.1 `spectral_dense`
+
+这是最早的一条主线。对每个目标层，在截断谱子空间中维护一个小矩阵
 
 $$
 M_\ell \in \mathbb{R}^{r \times r}.
@@ -83,7 +103,49 @@ $$
 W_\ell^{\text{eff}} = W_\ell + \Delta W_\ell(M_\ell).
 $$
 
-### 2.2 当前实现的一个关键细节
+#### 2.2.2 `lora_es`
+
+这一支不再先进入谱子空间，而是直接在原始权重形状上维护 LoRA 因子。对每个目标层，设 LoRA rank 为 $k$，维护
+
+$$
+B_\ell \in \mathbb{R}^{d_{\text{out},\ell} \times k}, \qquad
+A_\ell \in \mathbb{R}^{k \times d_{\text{in},\ell}}.
+$$
+
+于是该层增量直接写成
+
+$$
+\Delta W_\ell = B_\ell A_\ell.
+$$
+
+实现里为了统一 ES / CMA-ES 的状态接口，实际保存的是一个拼接后的 latent state tensor，但数学上等价于直接搜索一组 LoRA 因子。
+
+#### 2.2.3 `full_factorized_m`
+
+这一支仍然保持 rewiring 视角，但不再在截断后的 `r x r` dense `M_\ell` 上搜索，而是在完整谱基上维护一个低秩因子化的 rewiring matrix。设 factor rank 为 $k$，维护
+
+$$
+P_\ell \in \mathbb{R}^{r_{\max,\ell} \times k}, \qquad
+Q_\ell \in \mathbb{R}^{r_{\max,\ell} \times k},
+$$
+
+并定义
+
+$$
+M_\ell = P_\ell Q_\ell^\top.
+$$
+
+于是
+
+$$
+\Delta W_\ell
+= U_\ell M_\ell V_\ell^\top
+= U_\ell P_\ell Q_\ell^\top V_\ell^\top.
+$$
+
+它可以理解为“full basis 的谱空间 rewiring”，但把完整 `M_\ell` 的巨大搜索空间压缩成一个 low-rank 因子化形式。
+
+### 2.3 `spectral_dense` 的一个关键细节
 
 SVD cache 中会保存
 
@@ -110,7 +172,7 @@ $$
 对一个样本 $(x, y)$，模型生成文本输出记为
 
 $$
-\hat{z} \sim \pi_M(\cdot \mid x).
+\hat{z} \sim \pi_\theta(\cdot \mid x).
 $$
 
 当前 GSM8K reward 只使用 boxed 数值 exact match。把 reward 写成
@@ -134,7 +196,7 @@ $$
 则 batch 平均 reward 为
 
 $$
-\widehat{J}_{\mathcal{B}}(M)
+\widehat{J}_{\mathcal{B}}(\theta)
 = \frac{1}{B} \sum_{b=1}^B R(\hat{z}_b, y_b).
 $$
 
@@ -146,9 +208,15 @@ $$
 
 1. `pairwise_directional`
 2. `gaussian_mean`
-3. `per_layer_cma_es`
+3. `per_layer_diagonal_cma_es`
 
-它们共享同一个低秩谱状态参数化，但对“如何采样 mutant、如何把 reward 变成更新方向”的处理不同。下面分开写。
+为了统一书写，下面把“每层可训练状态块”统一记成
+
+$$
+Z_\ell.
+$$
+
+对 `spectral_dense`，有 $Z_\ell = M_\ell \in \mathbb{R}^{r \times r}$；对 `lora_es`，有 $Z_\ell$ 等价于一组 LoRA 因子；对 `full_factorized_m`，有 $Z_\ell$ 等价于一组 $(P_\ell,Q_\ell)$ 因子。三种更新规则都作用在这些 per-layer latent state 上。下面分开写。
 
 ### 4.1 `pairwise_directional`：antithetic pairwise 采样
 
@@ -156,7 +224,7 @@ $$
 
 $$
 \varepsilon = \{\varepsilon_\ell\}_{\ell \in \mathcal{L}}, \qquad
-\varepsilon_\ell \in \mathbb{R}^{r \times r}, \qquad
+\varepsilon_\ell \in \mathrm{shape}(Z_\ell), \qquad
 \varepsilon_\ell \sim \mathcal{N}(0, I).
 $$
 
@@ -165,31 +233,30 @@ $$
 给定探索半径 $\sigma > 0$，定义高斯平滑目标
 
 $$
-\widetilde{J}_\sigma(M)
-= \mathbb{E}_{\varepsilon}\left[\widehat{J}_{\mathcal{B}}(M + \sigma \varepsilon)\right].
+= \mathbb{E}_{\varepsilon}\left[\widehat{J}_{\mathcal{B}}(\theta + \sigma \varepsilon)\right].
 $$
 
 由高斯平滑的标准恒等式，有
 
 $$
-\nabla_M \widetilde{J}_\sigma(M)
+\nabla_\theta \widetilde{J}_\sigma(\theta)
 = \frac{1}{\sigma}
 \mathbb{E}_{\varepsilon}
 \left[
-\widehat{J}_{\mathcal{B}}(M + \sigma \varepsilon)\,\varepsilon
+\widehat{J}_{\mathcal{B}}(\theta + \sigma \varepsilon)\,\varepsilon
 \right].
 $$
 
 利用高斯分布关于原点的对称性，也可以写成 antithetic 形式：
 
 $$
-\nabla_M \widetilde{J}_\sigma(M)
+\nabla_\theta \widetilde{J}_\sigma(\theta)
 = \frac{1}{2\sigma}
 \mathbb{E}_{\varepsilon}
 \left[
 \left(
-\widehat{J}_{\mathcal{B}}(M + \sigma \varepsilon)
-- \widehat{J}_{\mathcal{B}}(M - \sigma \varepsilon)
+\widehat{J}_{\mathcal{B}}(\theta + \sigma \varepsilon)
+- \widehat{J}_{\mathcal{B}}(\theta - \sigma \varepsilon)
 \right)\varepsilon
 \right].
 $$
@@ -205,15 +272,15 @@ $$
 对每个 $i \in \{1, \dots, H\}$，采样一个噪声方向 $\varepsilon^{(i)}$，并构造一对 mutant：
 
 $$
-M^{(i,+)} = M_t + \sigma \varepsilon^{(i)}, \qquad
-M^{(i,-)} = M_t - \sigma \varepsilon^{(i)}.
+\theta^{(i,+)} = \theta_t + \sigma \varepsilon^{(i)}, \qquad
+\theta^{(i,-)} = \theta_t - \sigma \varepsilon^{(i)}.
 $$
 
 记对应 batch 平均 reward 为
 
 $$
-r_i^+ = \widehat{J}_{\mathcal{B}}(M^{(i,+)}), \qquad
-r_i^- = \widehat{J}_{\mathcal{B}}(M^{(i,-)}).
+r_i^+ = \widehat{J}_{\mathcal{B}}(\theta^{(i,+)}), \qquad
+r_i^- = \widehat{J}_{\mathcal{B}}(\theta^{(i,-)}).
 $$
 
 那么 antithetic 差分估计器为
@@ -318,25 +385,23 @@ $$
 - 在 reward 很稀疏或很 noisy 时，方向估计方差通常比 `pairwise_directional` 更大；
 - 但它不依赖“前半 / 后半必须成对”的结构，因此在一些自定义采样策略下更灵活。
 
-### 4.3 `per_layer_cma_es`：每层独立维护协方差的 CMA-ES
+### 4.3 `per_layer_diagonal_cma_es`：每层独立维护对角协方差的 CMA-ES
 
 第三条路径不再把所有 layer 都视为共享同一个各向同性高斯，而是对每个目标层单独维护一个搜索分布。
 
-对任意目标层 $\ell$，先把状态矩阵展平：
+对任意目标层 $\ell$，先把该层的 latent state $Z_\ell$ 展平：
 
 $$
-x_\ell = \mathrm{vec}(M_\ell) \in \mathbb{R}^{r^2}.
+x_\ell = \mathrm{vec}(Z_\ell) \in \mathbb{R}^{n_\ell}.
 $$
 
 当前实现会为每个 layer 单独维护
 
 $$
 \sigma_\ell, \qquad
-C_\ell \in \mathbb{R}^{r^2 \times r^2}, \qquad
-L_\ell L_\ell^\top = C_\ell,
+d_\ell \in \mathbb{R}^{n_\ell}_{>0},
 $$
-
-其中 $L_\ell$ 是协方差的 Cholesky 因子。
+其中 $d_\ell$ 是该层搜索分布的对角协方差向量。
 
 采样时，先取标准正态方向
 
@@ -344,10 +409,10 @@ $$
 z_\ell^{(i)} \sim \mathcal{N}(0, I),
 $$
 
-再做线性变换
+再做逐元素缩放
 
 $$
-y_\ell^{(i)} = L_\ell z_\ell^{(i)},
+y_\ell^{(i)} = \sqrt{d_\ell} \odot z_\ell^{(i)},
 $$
 
 最后构造 mutant：
@@ -369,14 +434,14 @@ $$
 
 - 用 $\sigma_\ell y_{\ell,w}$ 形成该层的均值步长；
 - 更新每层的 evolution paths `p_sigma` 与 `p_c`；
-- 用 rank-one + rank-$\mu$ 的形式更新 $C_\ell$；
-- 重新分解协方差，并自适应更新每层的 $\sigma_\ell$。
+- 用对角 rank-one + rank-$\mu$ 的形式更新 $d_\ell$；
+- 自适应更新每层的 $\sigma_\ell$。
 
-因此 `per_layer_cma_es` 的本质是：
+因此 `per_layer_diagonal_cma_es` 的本质是：
 
 - 不再固定使用各向同性高斯；
-- 每个 layer 自己学习“该往哪些方向探索、探索半径该变大还是变小”；
-- 代价是每层都要维护一个 `r^2 x r^2` 协方差矩阵，时间和显存开销都明显高于前两条标准 ES 路径。
+- 每个 layer 自己学习“各维度探索强度该怎么分配、探索半径该变大还是变小”；
+- 代价是每层都要额外维护一个 `r^2` 维的方差向量，但仍明显轻于 full-CMA。
 
 ## 5. 更新规则与 trust region
 
@@ -388,10 +453,10 @@ $$
 N = H = \frac{K}{2}
 $$
 
-表示 antithetic pair 数，则更新写成
+表示 antithetic pair 数，则在统一的 latent state 记号下，更新写成
 
 $$
-M_{t+1} = M_t + \frac{\alpha}{N\sigma}\sum_{i=1}^{N} A_i \varepsilon^{(i)}.
+Z_{t+1} = Z_t + \frac{\alpha}{N\sigma}\sum_{i=1}^{N} A_i \varepsilon^{(i)}.
 $$
 
 等价地，如果先把方向缓存记为
@@ -403,14 +468,14 @@ $$
 则原始更新直接写成
 
 $$
-\Delta M_t^{\text{raw}}
+\Delta Z_t^{\text{raw}}
 = \frac{\alpha}{\sigma} \widehat{d}_t.
 $$
 
 于是每一层的原始步长为
 
 $$
-\Delta M_{t,\ell}^{\text{raw}}
+\Delta Z_{t,\ell}^{\text{raw}}
 = \frac{\alpha}{\sigma} \widehat{d}_{t,\ell}.
 $$
 
@@ -437,23 +502,23 @@ $$
 则对每个目标层，执行
 
 $$
-\Delta M_{t,\ell}
+\Delta Z_{t,\ell}
 =
 \begin{cases}
-\Delta M_{t,\ell}^{\text{raw}}, &
-\|\Delta M_{t,\ell}^{\text{raw}}\|_F \le \tau_{\text{step}}, \\
-\dfrac{\tau_{\text{step}}}{\|\Delta M_{t,\ell}^{\text{raw}}\|_F}\,
-\Delta M_{t,\ell}^{\text{raw}}, &
-\|\Delta M_{t,\ell}^{\text{raw}}\|_F > \tau_{\text{step}}.
+\Delta Z_{t,\ell}^{\text{raw}}, &
+\|\Delta Z_{t,\ell}^{\text{raw}}\|_F \le \tau_{\text{step}}, \\
+\dfrac{\tau_{\text{step}}}{\|\Delta Z_{t,\ell}^{\text{raw}}\|_F}\,
+\Delta Z_{t,\ell}^{\text{raw}}, &
+\|\Delta Z_{t,\ell}^{\text{raw}}\|_F > \tau_{\text{step}}.
 \end{cases}
 $$
 
 ### 5.3 每层状态范数裁剪
 
-先做加法更新：
+为了统一三种参数化，这里把每层 latent state 统一写成 $Z_\ell$。先做加法更新：
 
 $$
-M_{t+1,\ell}^{\text{preclip}} = M_{t,\ell} + \Delta M_{t,\ell}.
+Z_{t+1,\ell}^{\text{preclip}} = Z_{t,\ell} + \Delta Z_{t,\ell}.
 $$
 
 再施加状态上界 $\tau_{\text{state}} > 0$，当前配置名为
@@ -465,14 +530,14 @@ $$
 当前代码的实际行为是“对每个 layer 的 `m_state` 分别裁剪”，因此
 
 $$
-M_{t+1,\ell}
+Z_{t+1,\ell}
 =
 \begin{cases}
-M_{t+1,\ell}^{\text{preclip}}, &
-\|M_{t+1,\ell}^{\text{preclip}}\|_F \le \tau_{\text{state}}, \\
-\dfrac{\tau_{\text{state}}}{\|M_{t+1,\ell}^{\text{preclip}}\|_F}\,
-M_{t+1,\ell}^{\text{preclip}}, &
-\|M_{t+1,\ell}^{\text{preclip}}\|_F > \tau_{\text{state}}.
+Z_{t+1,\ell}^{\text{preclip}}, &
+\|Z_{t+1,\ell}^{\text{preclip}}\|_F \le \tau_{\text{state}}, \\
+\dfrac{\tau_{\text{state}}}{\|Z_{t+1,\ell}^{\text{preclip}}\|_F}\,
+Z_{t+1,\ell}^{\text{preclip}}, &
+\|Z_{t+1,\ell}^{\text{preclip}}\|_F > \tau_{\text{state}}.
 \end{cases}
 $$
 
@@ -482,10 +547,10 @@ $$
 
 ### 6.1 为什么需要导出成 LoRA
 
-当前训练后端是 vLLM。vLLM 对“冻结 base model + 动态挂载多个 LoRA adapter”的支持非常成熟，因此当前实现没有直接在 vLLM 内部改写基础权重，而是把每个 mutant 的谱增量
+当前训练后端是 vLLM。vLLM 对“冻结 base model + 动态挂载多个 LoRA adapter”的支持非常成熟，因此当前实现没有直接在 vLLM 内部改写基础权重，而是把每个 mutant 的参数增量
 
 $$
-\Delta W_\ell = U_{\ell,r} M_\ell V_{\ell,r}^\top
+\Delta W_\ell
 $$
 
 导出为一个等价的 LoRA 形式
@@ -494,14 +559,20 @@ $$
 \Delta W_\ell = B_\ell A_\ell,
 $$
 
-其中
+其中导出的 LoRA rank 记为 $k_\ell$。于是
 
 $$
-A_\ell \in \mathbb{R}^{r \times d_{\text{in},\ell}}, \qquad
-B_\ell \in \mathbb{R}^{d_{\text{out},\ell} \times r}.
+A_\ell \in \mathbb{R}^{k_\ell \times d_{\text{in},\ell}}, \qquad
+B_\ell \in \mathbb{R}^{d_{\text{out},\ell} \times k_\ell}.
 $$
 
-### 6.2 严格构造
+这里的 $k_\ell$ 在不同参数化下含义不同：
+
+- `spectral_dense`：通常等于截断谱 rank $r$
+- `lora_es`：等于 `subspace.factor_rank`
+- `full_factorized_m`：等于因子 rank `subspace.factor_rank`
+
+#### `spectral_dense`
 
 先对谱状态矩阵 $M_\ell$ 做 SVD：
 
@@ -538,11 +609,51 @@ B_\ell A_\ell
 = \Delta W_\ell.
 $$
 
-因此导出的 LoRA adapter 与当前谱增量严格等价。仓库中的 `tests/test_spectral_vllm_export.py` 就是在验证
+因此导出的 LoRA adapter 与当前谱增量严格等价。
+
+#### `full_factorized_m`
+
+这一支中
 
 $$
-B_\ell A_\ell = U_{\ell,r} M_\ell V_{\ell,r}^\top.
+M_\ell = P_\ell Q_\ell^\top.
 $$
+
+因此直接取
+
+$$
+B_\ell = U_\ell P_\ell, \qquad
+A_\ell = Q_\ell^\top V_\ell^\top,
+$$
+
+就有
+
+$$
+B_\ell A_\ell
+= U_\ell P_\ell Q_\ell^\top V_\ell^\top
+= U_\ell M_\ell V_\ell^\top
+= \Delta W_\ell.
+$$
+
+也就是说，这一支不需要再对 $M_\ell$ 做一次 SVD，因子本身就已经是一个可直接导出的 LoRA 形式。
+
+#### `lora_es`
+
+这一支中本来就直接维护
+
+$$
+\Delta W_\ell = B_\ell A_\ell,
+$$
+
+所以导出到 vLLM 时只是把当前中心状态或 mutant 状态中的 LoRA 因子直接写盘，不需要额外做任何矩阵分解。
+
+仓库中的导出逻辑现在统一保证：
+
+$$
+B_\ell A_\ell = \Delta W_\ell.
+$$
+
+### 6.2 三种参数化如何导出成 LoRA
 
 ### 6.3 当前实现流程
 
@@ -551,14 +662,14 @@ $$
 1. 在 CPU 上加载冻结 base model。
 2. 选择 `layers.target_blocks` 和 `layers.target_modules` 指定的线性层。
 3. 为这些层创建或读取 SVD cache。
-4. 在 CPU 内存中维护每层的小状态矩阵 `m_state`。
+4. 在 CPU 内存中维护每层的小 trainable state `m_state`。对 `spectral_dense` 它是 `r x r`；对 `lora_es` 它对应一组 LoRA 因子；对 `full_factorized_m` 它对应一组谱空间因子。
 5. 对当前中心状态或某个 mutant 状态，导出一份 LoRA adapter 目录。
 6. 用 `LoRARequest` 把该 adapter 动态挂载到 vLLM 推理引擎上。
 
 这条路径的关键点是：
 
 - 大模型主权重始终冻结。
-- ES 更新只作用在一组很小的 $r \times r$ 状态矩阵上。
+- ES 更新只作用在一组很小的 per-layer latent state 上。
 - vLLM 只负责高吞吐 forward/generate。
 
 ## 7. 基于 vLLM 的高效并行训练是怎么做的
@@ -672,10 +783,10 @@ $$
 - 从主进程广播的噪声 payload
 - 从主进程广播的 step payload
 
-其中真正和“参数维度”相关的，是每层一个 $r \times r$ 小矩阵，而不是全模型梯度。因此每步通信复杂度更接近
+其中真正和“参数维度”相关的，是每层一个低维 latent state 张量，而不是全模型梯度。因此每步通信复杂度更接近
 
 $$
-\mathcal{O}(|\mathcal{L}|\,r^2 + K),
+\mathcal{O}\!\left(\sum_{\ell \in \mathcal{L}} \dim(Z_\ell) + K\right),
 $$
 
 而不是
@@ -713,14 +824,14 @@ $$
 设当前 step 为 $t$，其执行顺序可以写成：
 
 1. 主进程采样一个训练 batch $\mathcal{B}_t$，并广播给所有 rank。
-2. 主进程采样 antithetic 噪声 $\{\varepsilon^{(i)}\}_{i=1}^{H}$，并广播给所有 rank。
+2. 主进程采样当前配置对应的噪声 payload，并广播给所有 rank。
 3. 每个 rank 在本地激活自己的 mutant shard。
 4. 每个 rank 用 vLLM 对本地 shard 做 rollout，得到本地 reward。
 5. 所有 rank `all_gather_object` 回主进程。
-6. 主进程拼接出全局 reward 向量 $\{r_i^+\}_{i=1}^{H} \cup \{r_i^-\}_{i=1}^{H}$。
-7. 主进程计算方向 $\widehat{d}_t$、步长裁剪和状态裁剪。
+6. 主进程拼接出全局 reward 向量。
+7. 主进程按 `update_rule` 计算方向 $\widehat{d}_t$ 或 CMA step，并做步长裁剪和状态裁剪。
 8. 主进程把更新后的 step payload 广播给所有 rank。
-9. 所有 rank 同步应用该 step，得到新的中心状态 $M_{t+1}$。
+9. 所有 rank 同步应用该 step，得到新的中心状态。
 10. 按 `eval.eval_every_steps` 做验证，并保存 `last` / `best` checkpoint。
 
 这里的关键是：全局协调只发生在“reward 聚合”和“低维状态同步”两个阶段，而昂贵的 rollout 是天然并行的。
@@ -731,14 +842,17 @@ $$
 
 ### 8.1 子空间定义：决定我们在什么低维空间里搜索
 
-这一组参数决定可训练空间的表达能力。它们回答的是：哪些层参与训练、每层允许用多少个谱方向来表示更新。
+这一组参数决定可训练空间的表达能力。它们回答的是：哪些层参与训练、采用哪一种参数化、每层允许多少个谱方向或 low-rank 因子来表示更新。
 
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `layers.target_blocks` | 指定哪些 transformer block 参与训练 | 全部 `28` 个 block (`0..27`) | block 越多，可调参数越多，表达能力更强，但 rollout 开销也更大 |
 | `layers.target_modules` | 指定每个 block 里哪些线性层参与训练 | 全部目标线性层 `[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]` | 从 attention-only 扩到 MLP 后，通常容量更强，但也更容易过拟合或更耗显存 |
-| `subspace.rank` | 每层谱子空间 rank，即每层状态矩阵 $M_\ell \in \mathbb{R}^{r\times r}$ 的边长 | `32` | `rank` 越大，搜索空间越大；但 LoRA rank、通信量和状态更新量也会随之增加 |
+| `subspace.parameterization` | 选择 `spectral_dense`、`lora_es` 或 `full_factorized_m` | `spectral_dense` | 决定是走截断谱 dense `M`、直接 LoRA 扰动，还是 full-basis 的 factorized `M` |
+| `subspace.rank` | 截断谱子空间 rank | `32` | 对 `spectral_dense` 生效；对 `full_factorized_m` 会被运行时忽略并自动改为 full basis；对 `lora_es` 不决定参数维度 |
 | `subspace.band_strategy` | 从奇异方向中抽取哪一段来构造谱子空间 | `top-band` | 当前主线默认用前几大奇异方向；如果后续扩展策略，这里决定子空间偏向哪类方向 |
+| `subspace.factor_rank` | LoRA-ES 或 factorized-`M` 的 low-rank 因子维度 $k$ | `8` | 越大表达能力越强；同时导出的 LoRA rank 和 latent state 维度也会随之变大 |
+| `subspace.factor_init_scale` | 因子初始化尺度 | `0.01` | 主要影响 `lora_es` / `full_factorized_m` 在训练初期的扰动幅度与对称性打破 |
 | `subspace.cache_dir` | SVD cache 保存目录 | `artifacts/svd_cache` | 主要影响复现实验和 sweep 时的复用效率，不改变算法本身 |
 
 ### 8.2 ES 更新：决定每一步探索多远、更新多大
@@ -747,7 +861,7 @@ $$
 
 - `pairwise_directional`：标准 mirrored ES，用 antithetic pair 的 reward 差分做方向估计；
 - `gaussian_mean`：标准 Gaussian ES，用全部 mutant reward 的均值加权噪声方向；
-- `per_layer_cma_es`：对每个 layer 的 `vec(M_l)` 分别维护一个高斯协方差，并按 layer 独立做 CMA-ES 风格的均值 / 协方差 / `sigma` 自适应。
+- `per_layer_diagonal_cma_es`：对每个 layer 的 `vec(Z_l)` 分别维护一个对角高斯方差，并按 layer 独立做 CMA-ES 风格的均值 / 方差 / `sigma` 自适应。
 
 其中前两者遵循标准 ES 更新式
 
@@ -757,7 +871,7 @@ $$
 
 因此这一组参数里：
 
-- `sigma` 控制扰动半径，也就是每个 mutant 离当前中心点有多远；
+- `sigma` 控制扰动半径，也就是每个 mutant 离当前 latent center state 有多远；
 - `alpha` 控制最终写回中心状态时的更新幅度；
 - `num_mutants` 控制每一步用多少个样本来估计方向；
 - trust region 是可选稳定化项，默认关闭；只有显式配置时才会限制单步更新和累计状态。
@@ -765,24 +879,27 @@ $$
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `es.num_mutants` | 每步总 mutant 数，必须为偶数 | `64` | 越大，方向估计方差越小，但每步 rollout 成本越高 |
-| `es.update_rule` | 选择 `pairwise_directional`、`gaussian_mean` 或 `per_layer_cma_es` | `pairwise_directional` | 前两者更轻，`per_layer_cma_es` 会额外学习每层搜索分布 |
+| `es.update_rule` | 选择 `pairwise_directional`、`gaussian_mean` 或 `per_layer_diagonal_cma_es` | `per_layer_diagonal_cma_es` | 前两者更轻，`per_layer_diagonal_cma_es` 会额外学习每层搜索分布 |
 | `es.sigma.m` | 扰动半径 $\sigma$ | `0.01` | 太小则 reward 差分信号弱，太大则局部线性近似变差 |
 | `es.alpha.m` | 标准 ES 更新中的步长系数 $\alpha$ | `0.005` | 直接控制更新强度；如果 loss/reward 波动很大，通常优先先降它 |
 | `es.trust_region.max_layer_step_norm.m` | 每层单步最大 Frobenius 范数 | 默认关闭 | 显式配置后可防止单次更新把某一层推得过猛 |
-| `es.trust_region.max_state_norm.m` | 每层状态最大 Frobenius 范数 | 默认关闭 | 显式配置后可限制累计状态半径，避免长期漂移到过远区域 |
+| `es.trust_region.max_state_norm.m` | 每层 latent state 最大 Frobenius 范数 | 默认关闭 | 对 `spectral_dense` 是 `M_l` 的范数上界；对另外两支则是因子张量的范数上界 |
 
-当 `es.update_rule=per_layer_cma_es` 时，`es.alpha.m` 不再决定均值更新，真正起作用的是 `es.sigma.m` 和 `es.cma.*`：
+当 `es.update_rule=per_layer_diagonal_cma_es` 时，`es.alpha.m` 不再决定均值更新，真正起作用的是 `es.sigma.m` 和 `es.cma.*`。这里的每层状态维度会随参数化而变化：
+
+- `spectral_dense`：每层维度约为 `r^2`
+- `lora_es`：每层维度约为 `k (d_out + d_in)`
+- `full_factorized_m`：每层维度约为 `2 r_max k`
 
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `es.cma.selection_ratio` | 每层 CMA-ES 重组时选取前多少比例的 mutant | `0.5` | 越小越偏 exploitation，越大越平滑 |
-| `es.cma.mean_step_scale` | 均值方向写回 `M_l` 时的额外缩放 | `1.0` | 可视为 CMA 均值步长的直接控制杆 |
+| `es.cma.mean_step_scale` | 均值方向写回该层 latent state 时的额外缩放 | `1.0` | 可视为 CMA 均值步长的直接控制杆 |
 | `es.cma.min_sigma` | 每层 `sigma_l` 的最小值 | `1e-6` | 防止探索半径塌缩到 0 |
 | `es.cma.max_sigma` | 每层 `sigma_l` 的最大值 | `0.1` | 防止搜索分布膨胀过快 |
-| `es.cma.min_eigenvalue` | 每层协方差最小特征值下界 | `1e-8` | 用于数值稳定和 SPD 修复 |
-| `es.cma.jitter` | 每层协方差分解前的 jitter | `1e-10` | Cholesky / Eigh 数值稳定化 |
+| `es.cma.min_eigenvalue` | 每层对角协方差元素的最小下界 | `1e-8` | 防止某些维度的方差塌到 0 |
 
-实践上，标准 ES 更看重 `es.alpha.m` 和 `es.sigma.m`；而 `per_layer_cma_es` 更看重 `es.sigma.m`、`es.cma.selection_ratio` 和 `es.cma.mean_step_scale`。
+实践上，标准 ES 更看重 `es.alpha.m` 和 `es.sigma.m`；而 `per_layer_diagonal_cma_es` 更看重 `es.sigma.m`、`es.cma.selection_ratio` 和 `es.cma.mean_step_scale`。
 
 ### 8.3 训练 batch：决定每一步看多少题、每次 rollout 切多大
 
@@ -857,8 +974,10 @@ $$
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `seed` | 全局随机种子 | `42` | 影响可复现性 |
-| `data.cache_dir` | 原始 GSM8K cache 路径 | `/GenSIvePFS/users/yfwang/data/gsm8k/hf_main_full` | 数据来源位置 |
-| `data.processed_dir` | 处理后数据集路径 | `artifacts/gsm8k_processed` | 影响数据复用 |
+| `data.root_dir` | 数据集根目录 | `dataset/<source>` | 统一数据接口入口 |
+| `data.raw_dir` | 原始数据目录 | `dataset/<source>/raw` | 数据来源位置 |
+| `data.processed_dir` | 处理后 DatasetDict 目录 | `dataset/<source>/processed` | 影响数据复用 |
+| `data.processed_exports_dir` | 统一导出的 parquet split 目录 | `dataset/<source>/processed_exports` | 便于外部复用与检查 |
 | `data.split_seed` | train/val 划分随机种子 | `42` | 影响验证集切分 |
 | `data.val_size` | validation 集大小 | `748` | 验证更稳定，但也更慢 |
 | `data.train_max_examples` | 训练样本裁剪上限，`0` 表示全量 | `0` | 适合快速 smoke test |
@@ -891,7 +1010,6 @@ $$
 | --- | --- |
 | `prompt.template_name` | 目前未接入；实际 prompt 模板由 `data.source` 在 `data/gsm8k.py` 中选择 |
 | `prompt.require_box_answer` | 目前未接入；boxed 格式要求同样在 `data/gsm8k.py` 中硬编码 |
-| `es.antithetic` | 控制是否使用 antithetic 噪声采样 |
 
 同理，下面这些字段虽然会被读取，但当前只能取固定值，否则训练入口会直接报错：
 
