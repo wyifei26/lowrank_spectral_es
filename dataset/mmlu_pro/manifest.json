@@ -1,0 +1,17 @@
+{
+  "source": "mmlu_pro",
+  "root": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro",
+  "raw_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro/raw",
+  "processed_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro/processed",
+  "processed_exports_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro/processed_exports",
+  "manifest_path": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/mmlu_pro/manifest.json",
+  "splits": [
+    "train",
+    "val",
+    "test"
+  ],
+  "format": {
+    "processed": "datasets.DatasetDict saved via save_to_disk",
+    "processed_exports": "train/val/test parquet with unified project schema"
+  }
+}

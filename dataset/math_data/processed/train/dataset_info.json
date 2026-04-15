@@ -1,0 +1,66 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "parquet",
+  "dataset_size": 1113238400,
+  "description": "",
+  "download_checksums": {
+    "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/math_data/raw/dapo-math-17k.parquet": {
+      "num_bytes": 299363855,
+      "checksum": null
+    }
+  },
+  "download_size": 299363855,
+  "features": {
+    "data_source": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "split": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_raw": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_value": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 1412602255,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 1113238400,
+      "num_examples": 1791700,
+      "shard_lengths": [
+        1048576,
+        743124
+      ],
+      "dataset_name": "parquet"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "source": "gsm8k",
+  "root": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/gsm8k",
+  "raw_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/gsm8k/raw",
+  "processed_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/gsm8k/processed",
+  "processed_exports_dir": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/gsm8k/processed_exports",
+  "manifest_path": "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/gsm8k/manifest.json",
+  "splits": [
+    "train",
+    "val",
+    "test"
+  ],
+  "format": {
+    "processed": "datasets.DatasetDict saved via save_to_disk",
+    "processed_exports": "train/val/test parquet with unified project schema"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "mmlu-pro",
+  "dataset_size": 8778931,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/TIGER-Lab/MMLU-Pro@54611cde22c74cca43dd78732198de6abe971398/data/test-00000-of-00001.parquet": {
+      "num_bytes": 4144185,
+      "checksum": null
+    },
+    "hf://datasets/TIGER-Lab/MMLU-Pro@54611cde22c74cca43dd78732198de6abe971398/data/validation-00000-of-00001.parquet": {
+      "num_bytes": 42857,
+      "checksum": null
+    }
+  },
+  "download_size": 4187042,
+  "features": {
+    "question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "options": {
+      "feature": {
+        "dtype": "string",
+        "_type": "Value"
+      },
+      "_type": "List"
+    },
+    "answer_index": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "category": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "src": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "split": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_raw": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_value": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "data_source": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 12965973,
+  "splits": {
+    "test": {
+      "name": "test",
+      "num_bytes": 8717671,
+      "num_examples": 12032,
+      "dataset_name": "mmlu-pro"
+    },
+    "validation": {
+      "name": "validation",
+      "num_bytes": 61260,
+      "num_examples": 70,
+      "dataset_name": "mmlu-pro"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

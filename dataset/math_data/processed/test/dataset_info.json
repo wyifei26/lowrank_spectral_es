@@ -1,0 +1,62 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "parquet",
+  "dataset_size": 1422081,
+  "description": "",
+  "download_checksums": {
+    "/GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/dataset/math_data/raw/test.parquet": {
+      "num_bytes": 500489,
+      "checksum": null
+    }
+  },
+  "download_size": 500489,
+  "features": {
+    "data_source": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "split": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_raw": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gold_value": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 1922570,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 1422081,
+      "num_examples": 1546,
+      "dataset_name": "parquet"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

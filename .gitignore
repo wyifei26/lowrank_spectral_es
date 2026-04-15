@@ -1,3 +1,6 @@
 runs
 artifacts
 __pycache__/
+
+# Python cache artifacts
+*.pyc
