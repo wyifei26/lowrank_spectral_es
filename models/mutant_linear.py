@@ -76,6 +76,9 @@ class AdapterLayerBase(nn.Module, ABC):
     def effective_matrix(self) -> torch.Tensor | None:
         raise NotImplementedError
 
+    def initial_noise_scale(self) -> torch.Tensor | None:
+        return None
+
 
 class MutantLinear(nn.Module):
     def __init__(self, base_layer: nn.Linear, adapter: AdapterLayerBase):

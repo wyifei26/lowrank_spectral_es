@@ -7,7 +7,7 @@
 当前仓库只保留一条实际可运行的主线：
 
 - 算法：`spectral_es`
-- 参数化分支：`spectral_dense`、`lora_es`、`full_factorized_m`
+- 参数化分支：`spectral_dense`、`spectral_diagonal`、`lora_es`、`full_factorized_m`
 - 推理后端：`vLLM`
 - 并行方式：`single-node multi-GPU mutant-parallel`
 - 更新规则：`pairwise directional`、`gaussian_mean` 或 `per_layer_diagonal_cma_es`
@@ -73,9 +73,9 @@ $$
 r_{\max,\ell} = \min(d_{\text{out},\ell}, d_{\text{in},\ell}).
 $$
 
-### 2.2 三种可训练参数化
+### 2.2 四种可训练参数化
 
-当前仓库有三种实际接通的参数化分支。它们共享同一个训练 / rollout / vLLM 挂载框架，但每层维护的可训练状态不同。
+当前仓库有四种实际接通的参数化分支。它们共享同一个训练 / rollout / vLLM 挂载框架，但每层维护的可训练状态不同。
 
 #### 2.2.1 `spectral_dense`
 
@@ -103,7 +103,69 @@ $$
 W_\ell^{\text{eff}} = W_\ell + \Delta W_\ell(M_\ell).
 $$
 
-#### 2.2.2 `lora_es`
+#### 2.2.2 `spectral_diagonal`
+
+这一支仍然工作在截断谱子空间里，但不再维护一个完整的 dense rewiring matrix，而是只维护对角元素
+
+$$
+s_\ell \in \mathbb{R}^{r}.
+$$
+
+对应地，把
+
+$$
+M_\ell = \operatorname{Diag}(s_\ell)
+$$
+
+限制为一个对角矩阵，于是该层增量写成
+
+$$
+\Delta W_\ell(s_\ell) = U_{\ell,r}\operatorname{Diag}(s_\ell)V_{\ell,r}^\top.
+$$
+
+整模型状态记为
+
+$$
+s = \{s_\ell\}_{\ell \in \mathcal{L}}.
+$$
+
+这意味着搜索只发生在 base model 的截断 SVD 奇异值对角线上，不再允许不同谱方向之间通过非对角项互相混合。
+
+当前实现还支持一个只对 `spectral_diagonal` 生效的“按奇异值比例初始化探索尺度”选项。设该层截断奇异值为
+
+$$
+\Sigma_{\ell,r} = \operatorname{Diag}(\sigma_{\ell,1}, \dots, \sigma_{\ell,r}),
+$$
+
+则可以先构造一个逐维缩放向量
+
+$$
+\gamma_\ell = (\gamma_{\ell,1}, \dots, \gamma_{\ell,r}),
+$$
+
+其中默认思路是
+
+$$
+\gamma_{\ell,i} \propto \sigma_{\ell,i}.
+$$
+
+若配置一个比例系数 $\rho \ge 0$，则当前实现会直接取
+
+$$
+\gamma_{\ell,i} = \rho \sigma_{\ell,i}.
+$$
+
+此时真实采样会变成
+
+$$
+\varepsilon_{\ell,i} \sim \mathcal{N}(0, \gamma_{\ell,i}^2),
+\qquad
+s_\ell^{(i)} = s_{\ell,t} + \sigma \varepsilon_\ell^{(i)}.
+$$
+
+因此在这个模式下，`es.sigma.m` 仍然是全局探索系数，而每一维真正的初始标准差会再乘上一个 $\rho \sigma_{\ell,i}$。直观上，大奇异值方向起始探索更大，小奇异值方向起始探索更小；$\rho$ 直接控制这个按奇异值成比例初始化的强度。
+
+#### 2.2.3 `lora_es`
 
 这一支不再先进入谱子空间，而是直接在原始权重形状上维护 LoRA 因子。对每个目标层，设 LoRA rank 为 $k$，维护
 
@@ -120,7 +182,7 @@ $$
 
 实现里为了统一 ES / CMA-ES 的状态接口，实际保存的是一个拼接后的 latent state tensor，但数学上等价于直接搜索一组 LoRA 因子。
 
-#### 2.2.3 `full_factorized_m`
+#### 2.2.4 `full_factorized_m`
 
 这一支仍然保持 rewiring 视角，但不再在截断后的 `r x r` dense `M_\ell` 上搜索，而是在完整谱基上维护一个低秩因子化的 rewiring matrix。设 factor rank 为 $k$，维护
 
@@ -145,7 +207,7 @@ $$
 
 它可以理解为“full basis 的谱空间 rewiring”，但把完整 `M_\ell` 的巨大搜索空间压缩成一个 low-rank 因子化形式。
 
-### 2.3 `spectral_dense` 的一个关键细节
+### 2.3 `spectral_dense` / `spectral_diagonal` 的一个关键细节
 
 SVD cache 中会保存
 
@@ -159,13 +221,19 @@ $$
 \Delta W_\ell = U_{\ell,r} M_\ell V_{\ell,r}^\top,
 $$
 
+或者在对角分支里
+
+$$
+\Delta W_\ell = U_{\ell,r}\operatorname{Diag}(s_\ell)V_{\ell,r}^\top,
+$$
+
 而不是例如
 
 $$
 \Delta W_\ell = U_{\ell,r} \Sigma_{\ell,r}^{1/2} M_\ell \Sigma_{\ell,r}^{1/2} V_{\ell,r}^\top.
 $$
 
-因此当前方法更准确地说，是“在选定的谱左右基张成的低维子空间中搜索”，而不是“按原始奇异值度量加权的自然谱更新”。
+因此当前方法更准确地说，是“在选定的谱左右基张成的低维子空间中搜索”；其中 `spectral_dense` 允许子空间内任意谱方向混合，而 `spectral_diagonal` 进一步限制为只沿奇异值对角方向搜索。两者都不是“按原始奇异值度量加权的自然谱更新”。
 
 ## 3. 训练目标与 batch reward
 
@@ -216,7 +284,7 @@ $$
 Z_\ell.
 $$
 
-对 `spectral_dense`，有 $Z_\ell = M_\ell \in \mathbb{R}^{r \times r}$；对 `lora_es`，有 $Z_\ell$ 等价于一组 LoRA 因子；对 `full_factorized_m`，有 $Z_\ell$ 等价于一组 $(P_\ell,Q_\ell)$ 因子。三种更新规则都作用在这些 per-layer latent state 上。下面分开写。
+对 `spectral_dense`，有 $Z_\ell = M_\ell \in \mathbb{R}^{r \times r}$；对 `spectral_diagonal`，有 $Z_\ell = s_\ell \in \mathbb{R}^{r}$；对 `lora_es`，有 $Z_\ell$ 等价于一组 LoRA 因子；对 `full_factorized_m`，有 $Z_\ell$ 等价于一组 $(P_\ell,Q_\ell)$ 因子。三种更新规则都作用在这些 per-layer latent state 上。下面分开写。
 
 ### 4.1 `pairwise_directional`：antithetic pairwise 采样
 
@@ -228,7 +296,43 @@ $$
 \varepsilon_\ell \sim \mathcal{N}(0, I).
 $$
 
-其中各层、各元素独立采样。
+其中默认情况下各层、各元素独立采样。
+
+但对 `spectral_diagonal`，当前实现还支持一个可选的逐维重标定模式。若配置
+
+- `subspace.diagonal_init_method = proportional`
+
+则会把该层缓存中的截断奇异值
+
+$$
+(\sigma_{\ell,1}, \dots, \sigma_{\ell,r})
+$$
+
+转成一个逐维噪声尺度向量
+
+$$
+\gamma_\ell = (\gamma_{\ell,1}, \dots, \gamma_{\ell,r}),
+$$
+
+其中
+
+$$
+\gamma_{\ell,i} = \rho \sigma_{\ell,i},
+$$
+
+并实际采样
+
+$$
+\varepsilon_\ell \sim \mathcal{N}(0, \operatorname{Diag}(\gamma_\ell^2)).
+$$
+
+若再乘上全局探索半径 `es.sigma.m = \sigma`，则 mutant 的真实扰动写成
+
+$$
+s_\ell^{(i)} = s_{\ell,t} + \sigma \varepsilon_\ell^{(i)}.
+$$
+
+因此此时每个对角谱方向的初始方差不再相同，而是按原始奇异值成比例变化，且比例系数由 `subspace.diagonal_init_rho` 直接给定。
 
 给定探索半径 $\sigma > 0$，定义高斯平滑目标
 
@@ -403,6 +507,20 @@ d_\ell \in \mathbb{R}^{n_\ell}_{>0},
 $$
 其中 $d_\ell$ 是该层搜索分布的对角协方差向量。
 
+默认情况下，初始化时
+
+$$
+d_\ell = \mathbf{1}.
+$$
+
+但如果 `spectral_diagonal` 开启了“按奇异值比例缩放初始探索方差”模式，那么当前实现会把
+
+$$
+d_{\ell,i}^{(0)} = \gamma_{\ell,i}^2
+$$
+
+作为该层 CMA 搜索分布的初始对角协方差。也就是说，CMA 不是只在标准正态基础上再学，而是从“不同谱方向起始探索强度已按原始奇异值重标定”的状态出发。
+
 采样时，先取标准正态方向
 
 $$
@@ -569,6 +687,7 @@ $$
 这里的 $k_\ell$ 在不同参数化下含义不同：
 
 - `spectral_dense`：通常等于截断谱 rank $r$
+- `spectral_diagonal`：通常也等于截断谱 rank $r$
 - `lora_es`：等于 `subspace.factor_rank`
 - `full_factorized_m`：等于因子 rank `subspace.factor_rank`
 
@@ -610,6 +729,40 @@ B_\ell A_\ell
 $$
 
 因此导出的 LoRA adapter 与当前谱增量严格等价。
+
+#### `spectral_diagonal`
+
+这一支里
+
+$$
+M_\ell = \operatorname{Diag}(s_\ell).
+$$
+
+把对角元素按符号拆成
+
+$$
+\operatorname{Diag}(s_\ell)
+= \operatorname{Diag}\!\big(\operatorname{sign}(s_\ell)\sqrt{|s_\ell|}\big)
+\operatorname{Diag}\!\big(\sqrt{|s_\ell|}\big).
+$$
+
+更具体地，可定义
+
+$$
+B_\ell = U_{\ell,r}\operatorname{Diag}\!\big(\operatorname{sign}(s_\ell)\sqrt{|s_\ell|}\big),
+\qquad
+A_\ell = \operatorname{Diag}\!\big(\sqrt{|s_\ell|}\big)V_{\ell,r}^\top.
+$$
+
+则有
+
+$$
+B_\ell A_\ell
+= U_{\ell,r}\operatorname{Diag}(s_\ell)V_{\ell,r}^\top
+= \Delta W_\ell.
+$$
+
+因此这一支虽然只维护对角谱状态，但仍然可以无损导出成 rank-$r$ 的 LoRA adapter。
 
 #### `full_factorized_m`
 
@@ -653,7 +806,7 @@ $$
 B_\ell A_\ell = \Delta W_\ell.
 $$
 
-### 6.2 三种参数化如何导出成 LoRA
+### 6.2 四种参数化如何导出成 LoRA
 
 ### 6.3 当前实现流程
 
@@ -662,7 +815,7 @@ $$
 1. 在 CPU 上加载冻结 base model。
 2. 选择 `layers.target_blocks` 和 `layers.target_modules` 指定的线性层。
 3. 为这些层创建或读取 SVD cache。
-4. 在 CPU 内存中维护每层的小 trainable state `m_state`。对 `spectral_dense` 它是 `r x r`；对 `lora_es` 它对应一组 LoRA 因子；对 `full_factorized_m` 它对应一组谱空间因子。
+4. 在 CPU 内存中维护每层的小 trainable state `m_state`。对 `spectral_dense` 它是 `r x r`；对 `spectral_diagonal` 它是长度为 `r` 的对角向量；对 `lora_es` 它对应一组 LoRA 因子；对 `full_factorized_m` 它对应一组谱空间因子。
 5. 对当前中心状态或某个 mutant 状态，导出一份 LoRA adapter 目录。
 6. 用 `LoRARequest` 把该 adapter 动态挂载到 vLLM 推理引擎上。
 
@@ -832,7 +985,7 @@ $$
 7. 主进程按 `update_rule` 计算方向 $\widehat{d}_t$ 或 CMA step，并做步长裁剪和状态裁剪。
 8. 主进程把更新后的 step payload 广播给所有 rank。
 9. 所有 rank 同步应用该 step，得到新的中心状态。
-10. 按 `eval.eval_every_steps` 做验证，并保存 `last` / `best` checkpoint。
+10. 按 `output.checkpoint_every_steps` 保存阶段性 `step_XXXX` checkpoint；按 `eval.eval_every_steps` 做验证，并保存 `last` / `best` checkpoint。
 
 这里的关键是：全局协调只发生在“reward 聚合”和“低维状态同步”两个阶段，而昂贵的 rollout 是天然并行的。
 
@@ -848,9 +1001,11 @@ $$
 | --- | --- | --- | --- |
 | `layers.target_blocks` | 指定哪些 transformer block 参与训练 | 全部 `28` 个 block (`0..27`) | block 越多，可调参数越多，表达能力更强，但 rollout 开销也更大 |
 | `layers.target_modules` | 指定每个 block 里哪些线性层参与训练 | 全部目标线性层 `[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]` | 从 attention-only 扩到 MLP 后，通常容量更强，但也更容易过拟合或更耗显存 |
-| `subspace.parameterization` | 选择 `spectral_dense`、`lora_es` 或 `full_factorized_m` | `spectral_dense` | 决定是走截断谱 dense `M`、直接 LoRA 扰动，还是 full-basis 的 factorized `M` |
-| `subspace.rank` | 截断谱子空间 rank | `32` | 对 `spectral_dense` 生效；对 `full_factorized_m` 会被运行时忽略并自动改为 full basis；对 `lora_es` 不决定参数维度 |
+| `subspace.parameterization` | 选择 `spectral_dense`、`spectral_diagonal`、`lora_es` 或 `full_factorized_m` | `spectral_dense` | 决定是走截断谱 dense `M`、截断谱 diagonal `M`、直接 LoRA 扰动，还是 full-basis 的 factorized `M` |
+| `subspace.rank` | 截断谱子空间 rank | `32` | 对 `spectral_dense` 和 `spectral_diagonal` 生效；对 `full_factorized_m` 会被运行时忽略并自动改为 full basis；对 `lora_es` 不决定参数维度 |
 | `subspace.band_strategy` | 从奇异方向中抽取哪一段来构造谱子空间 | `top-band` | 当前主线默认用前几大奇异方向；如果后续扩展策略，这里决定子空间偏向哪类方向 |
+| `subspace.diagonal_init_method` | `spectral_diagonal` 的初始化方式 | `none` | 设为 `proportional` 时，会按每个奇异值乘上比例系数 `rho` 来设置逐维初始探索尺度 |
+| `subspace.diagonal_init_rho` | `spectral_diagonal` 的 proportional 初始化系数 $\rho$ | `0.0` | 当 `diagonal_init_method=proportional` 时生效；越大表示越强地按原始奇异值放大各维初始探索尺度 |
 | `subspace.factor_rank` | LoRA-ES 或 factorized-`M` 的 low-rank 因子维度 $k$ | `8` | 越大表达能力越强；同时导出的 LoRA rank 和 latent state 维度也会随之变大 |
 | `subspace.factor_init_scale` | 因子初始化尺度 | `0.01` | 主要影响 `lora_es` / `full_factorized_m` 在训练初期的扰动幅度与对称性打破 |
 | `subspace.cache_dir` | SVD cache 保存目录 | `artifacts/svd_cache` | 主要影响复现实验和 sweep 时的复用效率，不改变算法本身 |
@@ -876,6 +1031,14 @@ $$
 - `num_mutants` 控制每一步用多少个样本来估计方向；
 - trust region 是可选稳定化项，默认关闭；只有显式配置时才会限制单步更新和累计状态。
 
+需要注意：当 `spectral_diagonal` 开启 `subspace.diagonal_init_method=proportional` 时，`es.sigma.m` 不再直接等于每一维的真实采样标准差，而是一个“全局基准系数”。第 $i$ 个谱方向的真实初始标准差会变成
+
+$$
+\sigma \gamma_{\ell,i} = \sigma \rho \sigma_{\ell,i},
+$$
+
+其中 $\rho$ 是显式配置的 proportional 初始化系数。
+
 | 配置项 | 作用 | 当前默认值 | 调参时通常看什么 |
 | --- | --- | --- | --- |
 | `es.num_mutants` | 每步总 mutant 数，必须为偶数 | `64` | 越大，方向估计方差越小，但每步 rollout 成本越高 |
@@ -883,11 +1046,12 @@ $$
 | `es.sigma.m` | 扰动半径 $\sigma$ | `0.01` | 太小则 reward 差分信号弱，太大则局部线性近似变差 |
 | `es.alpha.m` | 标准 ES 更新中的步长系数 $\alpha$ | `0.005` | 直接控制更新强度；如果 loss/reward 波动很大，通常优先先降它 |
 | `es.trust_region.max_layer_step_norm.m` | 每层单步最大 Frobenius 范数 | 默认关闭 | 显式配置后可防止单次更新把某一层推得过猛 |
-| `es.trust_region.max_state_norm.m` | 每层 latent state 最大 Frobenius 范数 | 默认关闭 | 对 `spectral_dense` 是 `M_l` 的范数上界；对另外两支则是因子张量的范数上界 |
+| `es.trust_region.max_state_norm.m` | 每层 latent state 最大 Frobenius 范数 | 默认关闭 | 对 `spectral_dense` 是 `M_l` 的范数上界；对 `spectral_diagonal` 是对角向量的 $\ell_2$ 范数上界；对另外两支则是因子张量的范数上界 |
 
 当 `es.update_rule=per_layer_diagonal_cma_es` 时，`es.alpha.m` 不再决定均值更新，真正起作用的是 `es.sigma.m` 和 `es.cma.*`。这里的每层状态维度会随参数化而变化：
 
 - `spectral_dense`：每层维度约为 `r^2`
+- `spectral_diagonal`：每层维度约为 `r`
 - `lora_es`：每层维度约为 `k (d_out + d_in)`
 - `full_factorized_m`：每层维度约为 `2 r_max k`
 
@@ -922,6 +1086,7 @@ $$
 | --- | --- | --- | --- |
 | `eval.micro_batch` | 验证/测试时的 question micro-batch | `187` | 主要看在不 OOM 的前提下把评估吞吐打满 |
 | `eval.eval_every_steps` | 每多少步做一次验证 | `5` | 更频繁能更快看到趋势，但会增加训练中断开销 |
+| `output.checkpoint_every_steps` | 每多少步保存一次阶段性 `step_XXXX` checkpoint | `30` | 更小更利于回溯中间状态，但会增加 I/O 与存储开销 |
 | `eval.skip_initial_validation` | 是否跳过 step 0 验证 | `true` | 主要影响日志习惯，不影响训练算法 |
 
 ### 8.5 并行执行：决定 mutant 如何在多卡上切分

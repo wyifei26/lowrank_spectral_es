@@ -156,7 +156,7 @@ class VLLMSpectralExecutor:
                             "id": q_records[idx]["id"],
                             "data_source": q_records[idx].get("data_source"),
                             "benchmark": benchmark_name,
-                            "question": q_records[idx]["question"],
+                            "prompt": q_records[idx]["prompt"],
                             "gold_value": result.gold_value,
                             "prediction": text,
                             "reward": result.reward,
@@ -265,7 +265,7 @@ class VLLMSpectralExecutor:
                             {
                                 "record_index": record.get("_record_index"),
                                 "id": record["id"],
-                                "question": record["question"],
+                                "prompt": record["prompt"],
                                 "gold_value": result.gold_value,
                                 "prediction": text,
                                 "reward": result.reward,

@@ -58,6 +58,7 @@ class PerLayerCMAES:
         *,
         layer_shapes: dict[str, torch.Size],
         sigma_config: Any,
+        initial_noise_scales: dict[str, torch.Tensor] | None = None,
         cma_config: dict[str, Any] | None = None,
         dtype: torch.dtype = torch.float32,
         device: torch.device | None = None,
@@ -74,12 +75,17 @@ class PerLayerCMAES:
         self.min_sigma = _resolve_positive_float(self.cma_config, "min_sigma", 1e-6)
         self.max_sigma = _resolve_optional_positive_float(self.cma_config, "max_sigma")
         self.min_eigenvalue = _resolve_positive_float(self.cma_config, "min_eigenvalue", 1e-8)
+        initial_noise_scales = dict(initial_noise_scales or {})
         self.layers: dict[str, LayerCMAState] = {}
         for name, shape in self.layer_shapes.items():
             dim = math.prod(shape)
+            cov_diag = torch.ones(dim, dtype=self.dtype, device=self.device)
+            if name in initial_noise_scales:
+                scaled = initial_noise_scales[name].reshape(dim).to(device=self.device, dtype=self.dtype)
+                cov_diag = torch.clamp_min(scaled.pow(2), self.min_eigenvalue)
             self.layers[name] = LayerCMAState(
                 sigma=torch.tensor(float(self.initial_sigma), dtype=self.dtype, device=self.device),
-                cov_diag=torch.ones(dim, dtype=self.dtype, device=self.device),
+                cov_diag=cov_diag,
                 p_sigma=torch.zeros(dim, dtype=self.dtype, device=self.device),
                 p_c=torch.zeros(dim, dtype=self.dtype, device=self.device),
             )

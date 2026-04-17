@@ -73,7 +73,7 @@ class ParamPreset:
     seed: int = 42
     trust_region_max_layer_step_norm_m: float = 0.0
     trust_region_max_state_norm_m: float = 0.0
-    cma_selection_ratio: float = 0.75
+    cma_selection_ratio: float = 0.5
     cma_mean_step_scale: float = 1.0
     cma_min_sigma: float = 1.0e-6
     cma_max_sigma: float = 0.02
@@ -92,6 +92,8 @@ class ParameterizationPreset:
     subspace_rank: int | None = None
     factor_rank: int = 0
     factor_init_scale: float = 0.001
+    diagonal_init_method: str = "none"
+    diagonal_init_rho: float = 0.0
     label: str = ""
     summary: str = ""
 
@@ -252,7 +254,7 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-1.7B-Base",
         thinking=False,
         num_mutants=64,
-        effective_question_batch=128,
+        effective_question_batch=16,
         eval_micro_batch=512,
         max_cpu_loras=64,
     ),
@@ -316,6 +318,24 @@ PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
         subspace_rank=32,
         label="Spectral dense M",
         summary="truncated spectral basis with a dense in-basis matrix M",
+    ),
+    "spectral_diagonal": ParameterizationPreset(
+        key="spectral_diagonal",
+        parameterization="spectral_diagonal",
+        sigma_m=0.02,
+        subspace_rank=32,
+        label="Spectral diagonal M",
+        summary="truncated spectral basis with perturbations only on the singular-value diagonal",
+    ),
+    "spectral_diagonal_proportional": ParameterizationPreset(
+        key="spectral_diagonal_proportional",
+        parameterization="spectral_diagonal",
+        sigma_m=0.05,
+        subspace_rank=512,
+        diagonal_init_method="proportional",
+        diagonal_init_rho=0.1,
+        label="Spectral diagonal M (proportional init)",
+        summary="truncated spectral basis with diagonal perturbations and proportional singular-value initialization scale rho",
     ),
     "lora_es": ParameterizationPreset(
         key="lora_es",
@@ -487,6 +507,8 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"subspace.parameterization={config.parameterization.parameterization}",
         f"subspace.factor_rank={config.parameterization.factor_rank}",
         f"subspace.factor_init_scale={config.parameterization.factor_init_scale}",
+        f"subspace.diagonal_init_method={config.parameterization.diagonal_init_method}",
+        f"subspace.diagonal_init_rho={config.parameterization.diagonal_init_rho}",
         f"subspace.band_strategy={config.params.band_strategy}",
         f"subspace.cache_dir={SVD_CACHE_DIR}",
         f"vllm.max_cpu_loras={config.model.max_cpu_loras}",
@@ -687,6 +709,8 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "effective_question_batch": resolved.model.effective_question_batch,
         "subspace_parameterization": resolved.parameterization.parameterization,
         "subspace_factor_rank": resolved.parameterization.factor_rank,
+        "diagonal_init_method": resolved.parameterization.diagonal_init_method,
+        "diagonal_init_rho": resolved.parameterization.diagonal_init_rho,
         "sigma_m": resolved.parameterization.sigma_m,
         "cma_selection_ratio": resolved.params.cma_selection_ratio,
         "cma_mean_step_scale": resolved.params.cma_mean_step_scale,

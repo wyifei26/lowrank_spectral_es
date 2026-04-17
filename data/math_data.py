@@ -9,11 +9,9 @@ from eval.gsm8k_reward import extract_gold_value
 
 
 PROMPT_TEMPLATE = (
-    "Solve the following math problem.\n"
-    "Reason step by step.\n"
-    "You must put the final answer in exactly one boxed form like "
-    "\\boxed{{123}}.\n"
-    "Problem: {question}"
+    "Solve the following question.\n"
+    "Reason step by step, and provide the final answer in \\boxed{{}} format.\n"
+    "Question: {question}"
 )
 _PROMPT_PREFIX = "Solve the following math problem step by step."
 _PROMPT_SUFFIX = 'Remember to put your answer on its own line after "Answer:".'

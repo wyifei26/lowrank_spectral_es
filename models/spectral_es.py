@@ -28,6 +28,21 @@ def _resolve_sigma(noise_bundle: dict[str, Any], sigma_config: Any) -> float:
     return float(sigma_override)
 
 
+def _resolve_diagonal_init_scale(
+    singular_values: torch.Tensor,
+    *,
+    init_method: str,
+    rho: float,
+) -> torch.Tensor:
+    if init_method == "none":
+        return torch.ones_like(singular_values, dtype=torch.float32)
+    if init_method != "proportional":
+        raise ValueError(f"unsupported diagonal init method: {init_method}")
+    if rho < 0.0:
+        raise ValueError(f"diagonal proportional rho must be >= 0, got {rho}")
+    return (singular_values.float().abs() * float(rho)).contiguous()
+
+
 class SpectralAdapterLayer(AdapterLayerBase):
     def __init__(self, *, layer_name: str, u: torch.Tensor, vh: torch.Tensor):
         super().__init__(layer_name=layer_name)
@@ -121,6 +136,129 @@ class SpectralAdapterLayer(AdapterLayerBase):
 
     def effective_matrix(self) -> torch.Tensor:
         return self.m_state.detach().cpu().clone()
+
+
+class DiagonalSpectralAdapterLayer(AdapterLayerBase):
+    def __init__(
+        self,
+        *,
+        layer_name: str,
+        u: torch.Tensor,
+        vh: torch.Tensor,
+        singular_values: torch.Tensor,
+        init_method: str = "none",
+        init_rho: float = 0.0,
+    ):
+        super().__init__(layer_name=layer_name)
+        self.register_buffer("u_basis", u.float().contiguous())
+        self.register_buffer("vh_basis", vh.float().contiguous())
+        self.register_buffer("v_basis", vh.float().transpose(0, 1).contiguous())
+        self.register_buffer("singular_values", singular_values.float().contiguous())
+        rank = int(vh.shape[0])
+        self.register_buffer("m_state", torch.zeros(rank, dtype=torch.float32, device=u.device))
+        self.register_buffer(
+            "noise_scale",
+            _resolve_diagonal_init_scale(
+                self.singular_values,
+                init_method=str(init_method).strip().lower(),
+                rho=float(init_rho),
+            ),
+        )
+        self.active_m: torch.Tensor | None = None
+
+    def sample_noise(self, num_mutants: int, *, antithetic: bool = True) -> dict[str, torch.Tensor]:
+        base_noise = _sample_noise_like(self.m_state, num_mutants=num_mutants, antithetic=antithetic)
+        return {"m": base_noise * self.noise_scale.unsqueeze(0)}
+
+    def activate_mutants(self, noise_bundle: dict[str, Any], sigma_config: Any) -> None:
+        sigma = _resolve_sigma(noise_bundle, sigma_config)
+        self.active_m = self.m_state.unsqueeze(0) + sigma * noise_bundle["m"]
+
+    def activate_current(self) -> None:
+        self.active_m = self.m_state.unsqueeze(0)
+
+    def clear_active(self) -> None:
+        self.active_m = None
+
+    def forward_delta(self, hidden_states: torch.Tensor, mutant_indices: torch.Tensor) -> torch.Tensor:
+        if self.active_m is None:
+            return torch.zeros(
+                (*hidden_states.shape[:-1], self.u_basis.shape[0]),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
+        diag_entries = self.active_m[mutant_indices].to(hidden_states.dtype)
+        proj = torch.einsum("bsi,ir->bsr", hidden_states, self.v_basis.to(hidden_states.dtype))
+        scaled = proj * diag_entries
+        return torch.einsum("bsr,or->bso", scaled, self.u_basis.to(hidden_states.dtype))
+
+    def apply_es_update(
+        self,
+        *,
+        utilities: torch.Tensor,
+        noise_bundle: dict[str, torch.Tensor],
+        alpha_config: Any,
+        sigma_config: Any,
+    ) -> None:
+        raise RuntimeError("legacy ES update path has been removed; use payload-based updates instead")
+
+    def state_norm(self) -> float:
+        return float(torch.linalg.vector_norm(self.m_state).item())
+
+    def apply_step(self, step_tensor: torch.Tensor, *, max_state_norm: float | None = None) -> None:
+        self.m_state.add_(step_tensor.to(self.m_state.dtype))
+        if max_state_norm is None or max_state_norm <= 0:
+            return
+        state_norm = self.state_norm()
+        if state_norm > max_state_norm and state_norm > 0:
+            self.m_state.mul_(max_state_norm / state_norm)
+
+    def apply_step_payload(
+        self,
+        step_bundle: dict[str, torch.Tensor],
+        *,
+        max_state_norm: float | None = None,
+    ) -> None:
+        if "m" not in step_bundle:
+            return
+        self.apply_step(step_bundle["m"], max_state_norm=max_state_norm)
+
+    def export_trainable_state(self) -> dict[str, torch.Tensor]:
+        return {
+            "m_state": self.m_state.detach().cpu().clone(),
+            "effective_m_state": torch.diag(self.m_state.detach()).cpu(),
+        }
+
+    def load_trainable_state(self, payload: dict[str, torch.Tensor]) -> None:
+        state = payload.get("m_state")
+        if state is None:
+            raise KeyError(f"{self.layer_name} checkpoint payload is missing m_state")
+        state = state.to(self.m_state.device, dtype=self.m_state.dtype)
+        if state.ndim == 2:
+            if state.shape[0] != state.shape[1] or state.shape[0] != self.m_state.shape[0]:
+                raise ValueError(
+                    f"{self.layer_name} diagonal state shape mismatch: "
+                    f"expected {(self.m_state.shape[0], self.m_state.shape[0])}, got {tuple(state.shape)}"
+                )
+            state = torch.diagonal(state, dim1=0, dim2=1)
+        self.m_state.copy_(state)
+
+    def export_lora_weights(self, *, active_index: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        diag_entries = self.m_state if active_index is None else self.active_m[active_index]
+        sqrt_abs = torch.sqrt(diag_entries.float().abs())
+        signed_left = torch.sign(diag_entries.float()) * sqrt_abs
+        lora_b = (self.u_basis.float() * signed_left.unsqueeze(0)).contiguous()
+        lora_a = (sqrt_abs.unsqueeze(1) * self.vh_basis.float()).contiguous()
+        return lora_a, lora_b
+
+    def export_lora_rank(self) -> int:
+        return int(self.m_state.shape[0])
+
+    def effective_matrix(self) -> torch.Tensor:
+        return torch.diag(self.m_state.detach()).cpu()
+
+    def initial_noise_scale(self) -> torch.Tensor | None:
+        return self.noise_scale.detach().cpu().clone()
 
 
 class FactorizedSpectralAdapterLayer(AdapterLayerBase):

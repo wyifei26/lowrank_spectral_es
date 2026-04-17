@@ -16,12 +16,12 @@ from volc_task_presets import (
 
 
 # Edit these six values before running the script.
-DATASET_KEY = "math_data"
-MODEL_KEY = "qwen3_8b_base"
-PARAMETERIZATION_KEY = "full_factorized_m"
+DATASET_KEY = "gsm8k"
+MODEL_KEY = "qwen3_1p7b_base"
+PARAMETERIZATION_KEY = "spectral_diagonal"
 PARAM_KEY = "default"
 SAMPLING_KEY = "cma"
-GPU_COUNT = 8
+GPU_COUNT = 2
 
 # Optional knobs for the generated task.
 WANDB_GROUP = "spectral_es_manual"

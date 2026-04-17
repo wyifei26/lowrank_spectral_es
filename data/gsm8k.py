@@ -9,10 +9,8 @@ from eval.gsm8k_reward import extract_gold_value
 
 
 PROMPT_TEMPLATE = (
-    "Solve the following GSM8K math word problem.\n"
-    "Reason step by step.\n"
-    "You must put the final numeric answer in exactly one boxed form like "
-    "\\boxed{{123}}. Do not use any other final answer format.\n\n"
+    "Solve the following question.\n"
+    "Reason step by step, and provide the final answer in \\boxed{{}} format.\n"
     "Question: {question}"
 )
 

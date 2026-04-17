@@ -9,14 +9,21 @@ import torch
 from safetensors.torch import save_file
 
 from models.layer_selector import LayerSelection
-from models.spectral_es import FactorizedSpectralAdapterLayer, LoRAESAdapterLayer, SpectralAdapterLayer
+from models.spectral_es import (
+    DiagonalSpectralAdapterLayer,
+    FactorizedSpectralAdapterLayer,
+    LoRAESAdapterLayer,
+    SpectralAdapterLayer,
+)
 
 
 PARAMETERIZATION_SPECTRAL_DENSE = "spectral_dense"
+PARAMETERIZATION_SPECTRAL_DIAGONAL = "spectral_diagonal"
 PARAMETERIZATION_LORA_ES = "lora_es"
 PARAMETERIZATION_FULL_FACTORIZED_M = "full_factorized_m"
 SUPPORTED_PARAMETERIZATIONS = {
     PARAMETERIZATION_SPECTRAL_DENSE,
+    PARAMETERIZATION_SPECTRAL_DIAGONAL,
     PARAMETERIZATION_LORA_ES,
     PARAMETERIZATION_FULL_FACTORIZED_M,
 }
@@ -32,6 +39,8 @@ class SpectralVLLMState:
         parameterization: str,
         factor_rank: int | None = None,
         factor_init_scale: float = 0.01,
+        diagonal_init_method: str = "none",
+        diagonal_init_rho: float = 0.0,
     ) -> None:
         if algorithm_name != "spectral_es":
             raise ValueError(f"vLLM backend currently only supports spectral_es, got {algorithm_name}")
@@ -45,7 +54,10 @@ class SpectralVLLMState:
         self.parameterization = parameterization
         self.factor_rank = factor_rank
         self.factor_init_scale = float(factor_init_scale)
-        self.adapters: dict[str, SpectralAdapterLayer | FactorizedSpectralAdapterLayer | LoRAESAdapterLayer] = {}
+        self.adapters: dict[
+            str,
+            SpectralAdapterLayer | DiagonalSpectralAdapterLayer | FactorizedSpectralAdapterLayer | LoRAESAdapterLayer,
+        ] = {}
         self.target_modules = sorted({selection.module_key for selection in selections})
 
         for selection in selections:
@@ -55,6 +67,15 @@ class SpectralVLLMState:
                     layer_name=selection.full_name,
                     u=cache_entry["u"].float(),
                     vh=cache_entry["vh"].float(),
+                )
+            elif parameterization == PARAMETERIZATION_SPECTRAL_DIAGONAL:
+                adapter = DiagonalSpectralAdapterLayer(
+                    layer_name=selection.full_name,
+                    u=cache_entry["u"].float(),
+                    vh=cache_entry["vh"].float(),
+                    singular_values=cache_entry["s"].float(),
+                    init_method=diagonal_init_method,
+                    init_rho=diagonal_init_rho,
                 )
             elif parameterization == PARAMETERIZATION_FULL_FACTORIZED_M:
                 if factor_rank is None or int(factor_rank) <= 0:
@@ -123,6 +144,14 @@ class SpectralVLLMState:
 
     def adapter_norms(self) -> dict[str, float]:
         return {name: adapter.state_norm() for name, adapter in self.adapters.items()}
+
+    def initial_noise_scales(self) -> dict[str, torch.Tensor]:
+        payload: dict[str, torch.Tensor] = {}
+        for name, adapter in self.adapters.items():
+            scale = adapter.initial_noise_scale()
+            if scale is not None:
+                payload[name] = scale
+        return payload
 
     def apply_step_payloads(
         self,
@@ -197,6 +226,8 @@ def build_vllm_spectral_state(
     factor_rank_raw = subspace_config.get("factor_rank")
     factor_rank = None if factor_rank_raw in (None, 0) else int(factor_rank_raw)
     factor_init_scale = float(subspace_config.get("factor_init_scale", 0.01))
+    diagonal_init_method = str(subspace_config.get("diagonal_init_method", "none")).strip().lower()
+    diagonal_init_rho = float(subspace_config.get("diagonal_init_rho", 0.0))
     return SpectralVLLMState(
         algorithm_name=algorithm_name,
         selections=selections,
@@ -204,6 +235,8 @@ def build_vllm_spectral_state(
         parameterization=parameterization,
         factor_rank=factor_rank,
         factor_init_scale=factor_init_scale,
+        diagonal_init_method=diagonal_init_method,
+        diagonal_init_rho=diagonal_init_rho,
     )
 
 

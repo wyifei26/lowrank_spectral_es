@@ -59,6 +59,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(config)
     _normalize_data_dirs(normalized)
     _normalize_layer_blocks(normalized)
+    _normalize_output_config(normalized)
     return normalized
 
 
@@ -106,6 +107,20 @@ def _normalize_layer_blocks(config: dict[str, Any]) -> None:
         return
     total_blocks = _resolve_total_transformer_blocks(config)
     layers["target_blocks"] = _resolve_target_blocks(layers["target_blocks"], total_blocks=total_blocks)
+
+
+def _normalize_output_config(config: dict[str, Any]) -> None:
+    output = config.get("output")
+    if output is None:
+        output = {}
+        config["output"] = output
+    if not isinstance(output, dict):
+        raise TypeError("config.output must be a dict when provided")
+
+    checkpoint_every_steps = output.get("checkpoint_every_steps", 30)
+    if not isinstance(checkpoint_every_steps, int) or checkpoint_every_steps <= 0:
+        raise ValueError("output.checkpoint_every_steps must be a positive integer")
+    output["checkpoint_every_steps"] = checkpoint_every_steps
 
 
 def _resolve_total_transformer_blocks(config: dict[str, Any]) -> int:

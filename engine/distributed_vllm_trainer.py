@@ -222,6 +222,7 @@ class DistributedVLLMSpectralESTrainer:
             self.cma_state = PerLayerCMAES(
                 layer_shapes={name: adapter.m_state.shape for name, adapter in self.state.adapters.items()},
                 sigma_config=config["es"]["sigma"],
+                initial_noise_scales=self.state.initial_noise_scales(),
                 cma_config=dict(config.get("es", {}).get("cma", {})),
             )
         cleanup_cpu_model(cpu_model)
@@ -994,10 +995,11 @@ class DistributedVLLMSpectralESTrainer:
 
         current_micro_batch = int(self.config["train"]["micro_batch"])
         current_k = int(self.config["es"]["num_mutants"])
+        checkpoint_every_steps = int(self.config.get("output", {}).get("checkpoint_every_steps", 30))
 
         for step in range(1, int(self.config["train"]["train_steps"]) + 1):
             self._train_one_step(step=step, current_k=current_k, current_micro_batch=current_micro_batch)
-            if self.is_main_process:
+            if self.is_main_process and step % checkpoint_every_steps == 0:
                 self._save_checkpoint(
                     step=step,
                     best_val_accuracy=best_val_accuracy,

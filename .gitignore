@@ -4,3 +4,9 @@ __pycache__/
 
 # Python cache artifacts
 *.pyc
+
+# Dataset cache artifacts
+dataset/**/cache-*.arrow
+
+# Dataset exported parquet artifacts
+dataset/**/processed_exports/

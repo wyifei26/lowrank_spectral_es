@@ -69,6 +69,7 @@ vllm:
 output:
   root_dir: /GenSIvePFS/users/yfwang/output/lowrank_spectral_es_rl
   run_id: spectral_es_vllm_mutant_parallel_math_r32_k64_q32_mb32
+  checkpoint_every_steps: 30
 wandb:
   enabled: true
   project: lowrank-spectral-es-rl

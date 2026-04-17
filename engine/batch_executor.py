@@ -52,7 +52,6 @@ class BatchExecutor:
             q_records = records[q_start : q_start + question_micro_batch]
             q_prompts = [item["prompt"] for item in q_records]
             q_ids = [item["id"] for item in q_records]
-            q_questions = [item["question"] for item in q_records]
 
             for m_start in range(0, num_mutants, self.mutant_chunk_size):
                 m_end = min(num_mutants, m_start + self.mutant_chunk_size)
@@ -94,7 +93,7 @@ class BatchExecutor:
                         predictions.append(
                             {
                                 "id": q_ids[question_idx],
-                                "question": q_questions[question_idx],
+                                "prompt": q_prompts[question_idx],
                                 "gold_value": result.gold_value,
                                 "prediction": text,
                                 "reward": result.reward,
