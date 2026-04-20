@@ -31,6 +31,8 @@ subspace:
   parameterization: spectral_dense
   rank: 32
   band_strategy: top-band
+  init_method: none
+  init_rho: 0.0
   factor_rank: 8
   factor_init_scale: 0.01
   cache_dir: /GenSIvePFS/users/yfwang/lowrank_spectral_es_rl/artifacts/svd_cache

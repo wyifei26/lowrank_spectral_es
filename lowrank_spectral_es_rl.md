@@ -131,7 +131,7 @@ $$
 
 这意味着搜索只发生在 base model 的截断 SVD 奇异值对角线上，不再允许不同谱方向之间通过非对角项互相混合。
 
-当前实现还支持一个只对 `spectral_diagonal` 生效的“按奇异值比例初始化探索尺度”选项。设该层截断奇异值为
+当前实现还支持一个谱参数化通用的“按奇异值比例初始化探索尺度”选项。设该层截断奇异值为
 
 $$
 \Sigma_{\ell,r} = \operatorname{Diag}(\sigma_{\ell,1}, \dots, \sigma_{\ell,r}),
@@ -298,9 +298,9 @@ $$
 
 其中默认情况下各层、各元素独立采样。
 
-但对 `spectral_diagonal`，当前实现还支持一个可选的逐维重标定模式。若配置
+对谱参数化，当前实现还支持一个可选的重标定模式。若配置
 
-- `subspace.diagonal_init_method = proportional`
+- `subspace.init_method = proportional`
 
 则会把该层缓存中的截断奇异值
 
@@ -332,7 +332,7 @@ $$
 s_\ell^{(i)} = s_{\ell,t} + \sigma \varepsilon_\ell^{(i)}.
 $$
 
-因此此时每个对角谱方向的初始方差不再相同，而是按原始奇异值成比例变化，且比例系数由 `subspace.diagonal_init_rho` 直接给定。
+因此此时每个对角谱方向的初始方差不再相同，而是按原始奇异值成比例变化，且比例系数由 `subspace.init_rho` 直接给定。对 `spectral_dense`，`r x r` 的 dense latent matrix 会使用两侧奇异值的几何均值作为对应谱坐标的初始尺度；对角项仍退化为 $\rho \sigma_{\ell,i}$。
 
 给定探索半径 $\sigma > 0$，定义高斯平滑目标
 
@@ -1004,8 +1004,8 @@ $$
 | `subspace.parameterization` | 选择 `spectral_dense`、`spectral_diagonal`、`lora_es` 或 `full_factorized_m` | `spectral_dense` | 决定是走截断谱 dense `M`、截断谱 diagonal `M`、直接 LoRA 扰动，还是 full-basis 的 factorized `M` |
 | `subspace.rank` | 截断谱子空间 rank | `32` | 对 `spectral_dense` 和 `spectral_diagonal` 生效；对 `full_factorized_m` 会被运行时忽略并自动改为 full basis；对 `lora_es` 不决定参数维度 |
 | `subspace.band_strategy` | 从奇异方向中抽取哪一段来构造谱子空间 | `top-band` | 当前主线默认用前几大奇异方向；如果后续扩展策略，这里决定子空间偏向哪类方向 |
-| `subspace.diagonal_init_method` | `spectral_diagonal` 的初始化方式 | `none` | 设为 `proportional` 时，会按每个奇异值乘上比例系数 `rho` 来设置逐维初始探索尺度 |
-| `subspace.diagonal_init_rho` | `spectral_diagonal` 的 proportional 初始化系数 $\rho$ | `0.0` | 当 `diagonal_init_method=proportional` 时生效；越大表示越强地按原始奇异值放大各维初始探索尺度 |
+| `subspace.init_method` | 谱参数化的初始化方式 | `none` | 设为 `proportional` 时，会按缓存奇异值设置初始探索尺度；`spectral_dense` 和 `spectral_diagonal` 都可用 |
+| `subspace.init_rho` | proportional 初始化系数 $\rho$ | `0.0` | 当 `init_method=proportional` 时生效；越大表示越强地按原始奇异值放大各维初始探索尺度 |
 | `subspace.factor_rank` | LoRA-ES 或 factorized-`M` 的 low-rank 因子维度 $k$ | `8` | 越大表达能力越强；同时导出的 LoRA rank 和 latent state 维度也会随之变大 |
 | `subspace.factor_init_scale` | 因子初始化尺度 | `0.01` | 主要影响 `lora_es` / `full_factorized_m` 在训练初期的扰动幅度与对称性打破 |
 | `subspace.cache_dir` | SVD cache 保存目录 | `artifacts/svd_cache` | 主要影响复现实验和 sweep 时的复用效率，不改变算法本身 |
@@ -1031,7 +1031,7 @@ $$
 - `num_mutants` 控制每一步用多少个样本来估计方向；
 - trust region 是可选稳定化项，默认关闭；只有显式配置时才会限制单步更新和累计状态。
 
-需要注意：当 `spectral_diagonal` 开启 `subspace.diagonal_init_method=proportional` 时，`es.sigma.m` 不再直接等于每一维的真实采样标准差，而是一个“全局基准系数”。第 $i$ 个谱方向的真实初始标准差会变成
+需要注意：当谱参数化开启 `subspace.init_method=proportional` 时，`es.sigma.m` 不再直接等于每一维的真实采样标准差，而是一个“全局基准系数”。对 `spectral_diagonal`，第 $i$ 个谱方向的真实初始标准差会变成
 
 $$
 \sigma \gamma_{\ell,i} = \sigma \rho \sigma_{\ell,i},

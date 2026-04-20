@@ -39,8 +39,8 @@ class SpectralVLLMState:
         parameterization: str,
         factor_rank: int | None = None,
         factor_init_scale: float = 0.01,
-        diagonal_init_method: str = "none",
-        diagonal_init_rho: float = 0.0,
+        init_method: str = "none",
+        init_rho: float = 0.0,
     ) -> None:
         if algorithm_name != "spectral_es":
             raise ValueError(f"vLLM backend currently only supports spectral_es, got {algorithm_name}")
@@ -67,6 +67,9 @@ class SpectralVLLMState:
                     layer_name=selection.full_name,
                     u=cache_entry["u"].float(),
                     vh=cache_entry["vh"].float(),
+                    singular_values=cache_entry["s"].float(),
+                    init_method=init_method,
+                    init_rho=init_rho,
                 )
             elif parameterization == PARAMETERIZATION_SPECTRAL_DIAGONAL:
                 adapter = DiagonalSpectralAdapterLayer(
@@ -74,8 +77,8 @@ class SpectralVLLMState:
                     u=cache_entry["u"].float(),
                     vh=cache_entry["vh"].float(),
                     singular_values=cache_entry["s"].float(),
-                    init_method=diagonal_init_method,
-                    init_rho=diagonal_init_rho,
+                    init_method=init_method,
+                    init_rho=init_rho,
                 )
             elif parameterization == PARAMETERIZATION_FULL_FACTORIZED_M:
                 if factor_rank is None or int(factor_rank) <= 0:
@@ -226,8 +229,10 @@ def build_vllm_spectral_state(
     factor_rank_raw = subspace_config.get("factor_rank")
     factor_rank = None if factor_rank_raw in (None, 0) else int(factor_rank_raw)
     factor_init_scale = float(subspace_config.get("factor_init_scale", 0.01))
-    diagonal_init_method = str(subspace_config.get("diagonal_init_method", "none")).strip().lower()
-    diagonal_init_rho = float(subspace_config.get("diagonal_init_rho", 0.0))
+    init_method = str(
+        subspace_config.get("init_method", subspace_config.get("diagonal_init_method", "none"))
+    ).strip().lower()
+    init_rho = float(subspace_config.get("init_rho", subspace_config.get("diagonal_init_rho", 0.0)))
     return SpectralVLLMState(
         algorithm_name=algorithm_name,
         selections=selections,
@@ -235,8 +240,8 @@ def build_vllm_spectral_state(
         parameterization=parameterization,
         factor_rank=factor_rank,
         factor_init_scale=factor_init_scale,
-        diagonal_init_method=diagonal_init_method,
-        diagonal_init_rho=diagonal_init_rho,
+        init_method=init_method,
+        init_rho=init_rho,
     )
 
 

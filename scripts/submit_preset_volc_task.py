@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from volc_task_presets import (
     DATASET_PRESETS,
+    INITIALIZATION_PRESETS,
     MODEL_PRESETS,
     PARAMETERIZATION_PRESETS,
     PARAM_PRESETS,
@@ -15,10 +16,11 @@ from volc_task_presets import (
 )
 
 
-# Edit these six values before running the script.
+# Edit these seven values before running the script.
 DATASET_KEY = "gsm8k"
 MODEL_KEY = "qwen3_1p7b_base"
-PARAMETERIZATION_KEY = "spectral_diagonal"
+PARAMETERIZATION_KEY = "spectral_dense"
+INITIALIZATION_KEY = "none"
 PARAM_KEY = "default"
 SAMPLING_KEY = "cma"
 GPU_COUNT = 2
@@ -32,6 +34,7 @@ def main() -> None:
         dataset=DATASET_PRESETS[DATASET_KEY],
         model=MODEL_PRESETS[MODEL_KEY],
         parameterization=PARAMETERIZATION_PRESETS[PARAMETERIZATION_KEY],
+        initialization=INITIALIZATION_PRESETS[INITIALIZATION_KEY],
         params=PARAM_PRESETS[PARAM_KEY],
         sampling=SAMPLING_PRESETS[SAMPLING_KEY],
         gpu_count=GPU_COUNT,

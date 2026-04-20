@@ -28,33 +28,65 @@ def _resolve_sigma(noise_bundle: dict[str, Any], sigma_config: Any) -> float:
     return float(sigma_override)
 
 
-def _resolve_diagonal_init_scale(
+def _resolve_spectral_init_scale(
     singular_values: torch.Tensor,
     *,
+    state_shape: torch.Size | tuple[int, ...],
     init_method: str,
     rho: float,
 ) -> torch.Tensor:
+    state_shape = torch.Size(state_shape)
     if init_method == "none":
-        return torch.ones_like(singular_values, dtype=torch.float32)
+        return torch.ones(state_shape, dtype=torch.float32, device=singular_values.device)
     if init_method != "proportional":
-        raise ValueError(f"unsupported diagonal init method: {init_method}")
+        raise ValueError(f"unsupported spectral init method: {init_method}")
     if rho < 0.0:
-        raise ValueError(f"diagonal proportional rho must be >= 0, got {rho}")
-    return (singular_values.float().abs() * float(rho)).contiguous()
+        raise ValueError(f"spectral proportional rho must be >= 0, got {rho}")
+    values = singular_values.float().abs()
+    if state_shape == torch.Size([values.numel()]):
+        return (values * float(rho)).contiguous()
+    if len(state_shape) == 2 and state_shape[0] == values.numel() and state_shape[1] == values.numel():
+        row_scale = torch.sqrt(torch.clamp_min(values, 0.0)).unsqueeze(1)
+        col_scale = torch.sqrt(torch.clamp_min(values, 0.0)).unsqueeze(0)
+        return (row_scale * col_scale * float(rho)).contiguous()
+    raise ValueError(
+        "proportional spectral init only supports rank-vector or square rank-matrix state; "
+        f"got state_shape={tuple(state_shape)} for {values.numel()} singular values"
+    )
 
 
 class SpectralAdapterLayer(AdapterLayerBase):
-    def __init__(self, *, layer_name: str, u: torch.Tensor, vh: torch.Tensor):
+    def __init__(
+        self,
+        *,
+        layer_name: str,
+        u: torch.Tensor,
+        vh: torch.Tensor,
+        singular_values: torch.Tensor,
+        init_method: str = "none",
+        init_rho: float = 0.0,
+    ):
         super().__init__(layer_name=layer_name)
         self.register_buffer("u_basis", u.float().contiguous())
         self.register_buffer("vh_basis", vh.float().contiguous())
         self.register_buffer("v_basis", vh.float().transpose(0, 1).contiguous())
+        self.register_buffer("singular_values", singular_values.float().contiguous())
         rank = vh.shape[0]
         self.register_buffer("m_state", torch.zeros(rank, rank, dtype=torch.float32, device=u.device))
+        self.register_buffer(
+            "noise_scale",
+            _resolve_spectral_init_scale(
+                self.singular_values,
+                state_shape=self.m_state.shape,
+                init_method=str(init_method).strip().lower(),
+                rho=float(init_rho),
+            ),
+        )
         self.active_m: torch.Tensor | None = None
 
     def sample_noise(self, num_mutants: int, *, antithetic: bool = True) -> dict[str, torch.Tensor]:
-        return {"m": _sample_noise_like(self.m_state, num_mutants=num_mutants, antithetic=antithetic)}
+        base_noise = _sample_noise_like(self.m_state, num_mutants=num_mutants, antithetic=antithetic)
+        return {"m": base_noise * self.noise_scale.unsqueeze(0)}
 
     def activate_mutants(self, noise_bundle: dict[str, Any], sigma_config: Any) -> None:
         sigma = _resolve_sigma(noise_bundle, sigma_config)
@@ -137,6 +169,9 @@ class SpectralAdapterLayer(AdapterLayerBase):
     def effective_matrix(self) -> torch.Tensor:
         return self.m_state.detach().cpu().clone()
 
+    def initial_noise_scale(self) -> torch.Tensor | None:
+        return self.noise_scale.detach().cpu().clone()
+
 
 class DiagonalSpectralAdapterLayer(AdapterLayerBase):
     def __init__(
@@ -158,8 +193,9 @@ class DiagonalSpectralAdapterLayer(AdapterLayerBase):
         self.register_buffer("m_state", torch.zeros(rank, dtype=torch.float32, device=u.device))
         self.register_buffer(
             "noise_scale",
-            _resolve_diagonal_init_scale(
+            _resolve_spectral_init_scale(
                 self.singular_values,
+                state_shape=self.m_state.shape,
                 init_method=str(init_method).strip().lower(),
                 rho=float(init_rho),
             ),

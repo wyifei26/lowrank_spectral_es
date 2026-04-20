@@ -92,8 +92,15 @@ class ParameterizationPreset:
     subspace_rank: int | None = None
     factor_rank: int = 0
     factor_init_scale: float = 0.001
-    diagonal_init_method: str = "none"
-    diagonal_init_rho: float = 0.0
+    label: str = ""
+    summary: str = ""
+
+
+@dataclass(frozen=True)
+class InitializationPreset:
+    key: str
+    init_method: str
+    init_rho: float = 0.0
     label: str = ""
     summary: str = ""
 
@@ -118,6 +125,7 @@ class TaskSelection:
     gpu_count: int
     wandb_group: str
     output_root_dir: str = str(OUTPUT_ROOT_DIR)
+    initialization: InitializationPreset | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +133,7 @@ class ResolvedTaskConfig:
     dataset: DatasetPreset
     model: ModelPreset
     parameterization: ParameterizationPreset
+    initialization: InitializationPreset
     params: ParamPreset
     sampling: SamplingPreset
     gpu_count: int
@@ -327,16 +336,6 @@ PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
         label="Spectral diagonal M",
         summary="truncated spectral basis with perturbations only on the singular-value diagonal",
     ),
-    "spectral_diagonal_proportional": ParameterizationPreset(
-        key="spectral_diagonal_proportional",
-        parameterization="spectral_diagonal",
-        sigma_m=0.05,
-        subspace_rank=512,
-        diagonal_init_method="proportional",
-        diagonal_init_rho=0.1,
-        label="Spectral diagonal M (proportional init)",
-        summary="truncated spectral basis with diagonal perturbations and proportional singular-value initialization scale rho",
-    ),
     "lora_es": ParameterizationPreset(
         key="lora_es",
         parameterization="lora_es",
@@ -352,6 +351,24 @@ PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
         factor_rank=8,
         label="Full-basis factorized M",
         summary="full spectral basis with factorized in-basis matrix M = P Q^T",
+    ),
+}
+
+
+INITIALIZATION_PRESETS: dict[str, InitializationPreset] = {
+    "none": InitializationPreset(
+        key="none",
+        init_method="none",
+        init_rho=0.0,
+        label="uniform init scale",
+        summary="default unit latent noise scale",
+    ),
+    "proportional": InitializationPreset(
+        key="proportional",
+        init_method="proportional",
+        init_rho=0.1,
+        label="proportional singular-value init",
+        summary="initial latent noise scale proportional to cached singular values",
     ),
 }
 
@@ -382,6 +399,7 @@ def resolve_task_selection(selection: TaskSelection) -> ResolvedTaskConfig:
         dataset=selection.dataset,
         model=selection.model,
         parameterization=selection.parameterization,
+        initialization=selection.initialization or INITIALIZATION_PRESETS["none"],
         params=selection.params,
         sampling=selection.sampling,
         gpu_count=gpu_count,
@@ -460,6 +478,8 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
     factor_tag = factor_rank_tag(config.parameterization)
     if factor_tag:
         suffix_parts.append(factor_tag)
+    if config.initialization.key != "none":
+        suffix_parts.append(f"init{config.initialization.key}")
     if config.params.notes_tag:
         suffix_parts.append(config.params.notes_tag)
     return "_".join(suffix_parts)
@@ -507,8 +527,8 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"subspace.parameterization={config.parameterization.parameterization}",
         f"subspace.factor_rank={config.parameterization.factor_rank}",
         f"subspace.factor_init_scale={config.parameterization.factor_init_scale}",
-        f"subspace.diagonal_init_method={config.parameterization.diagonal_init_method}",
-        f"subspace.diagonal_init_rho={config.parameterization.diagonal_init_rho}",
+        f"subspace.init_method={config.initialization.init_method}",
+        f"subspace.init_rho={config.initialization.init_rho}",
         f"subspace.band_strategy={config.params.band_strategy}",
         f"subspace.cache_dir={SVD_CACHE_DIR}",
         f"vllm.max_cpu_loras={config.model.max_cpu_loras}",
@@ -548,6 +568,8 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"{config.params.eval_split}_eval",
         config.parameterization.key,
     ]
+    if config.initialization.key != "none":
+        tags.append(config.initialization.key)
     basis_tag = basis_rank_tag(config.parameterization)
     if basis_tag:
         tags.append(basis_tag)
@@ -569,6 +591,8 @@ def build_description(config: ResolvedTaskConfig) -> str:
     mechanism_summary = config.sampling.mechanism_summary or config.sampling.update_rule
     parameterization_label = config.parameterization.label or config.parameterization.key
     parameterization_summary = config.parameterization.summary or config.parameterization.parameterization
+    initialization_label = config.initialization.label or config.initialization.key
+    initialization_summary = config.initialization.summary or config.initialization.init_method
     rank_text = basis_rank_tag(config.parameterization)
     factor_text = factor_rank_tag(config.parameterization)
     if rank_text and factor_text:
@@ -582,6 +606,7 @@ def build_description(config: ResolvedTaskConfig) -> str:
         f"K={config.model.num_mutants}, q_batch={config.model.effective_question_batch}, "
         f"micro_batch={config.train_micro_batch}, chunk={config.mutant_chunk_size}, "
         f"sampling={mechanism_label} ({mechanism_summary}), eval split {config.params.eval_split}, "
+        f"init={initialization_label} ({initialization_summary}), "
         f"thinking={config.model.thinking}, "
         f"gpu_count={config.gpu_count}."
     )
@@ -692,6 +717,7 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "dataset": resolved.dataset.key,
         "model": resolved.model.key,
         "parameterization": resolved.parameterization.key,
+        "initialization": resolved.initialization.key,
         "params": resolved.params.key,
         "sampling": resolved.sampling.key,
         "gpu_count": resolved.gpu_count,
@@ -709,8 +735,8 @@ def preview_submission(selection: TaskSelection, *, timestamp: str | None = None
         "effective_question_batch": resolved.model.effective_question_batch,
         "subspace_parameterization": resolved.parameterization.parameterization,
         "subspace_factor_rank": resolved.parameterization.factor_rank,
-        "diagonal_init_method": resolved.parameterization.diagonal_init_method,
-        "diagonal_init_rho": resolved.parameterization.diagonal_init_rho,
+        "init_method": resolved.initialization.init_method,
+        "init_rho": resolved.initialization.init_rho,
         "sigma_m": resolved.parameterization.sigma_m,
         "cma_selection_ratio": resolved.params.cma_selection_ratio,
         "cma_mean_step_scale": resolved.params.cma_mean_step_scale,
