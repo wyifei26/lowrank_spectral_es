@@ -11,7 +11,6 @@
 - 推理后端：`vLLM`
 - 并行方式：`single-node multi-GPU mutant-parallel`
 - 更新规则：`pairwise directional`、`gaussian_mean` 或 `per_layer_diagonal_cma_es`
-- 约束：`standard alpha-over-sigma ES step + per-layer trust region`
 - 任务：`GSM8K`、`math_data`、`MMLU-Pro`
 - reward：
   - `GSM8K` / `math_data`：boxed answer exact match
@@ -561,7 +560,7 @@ $$
 - 每个 layer 自己学习“各维度探索强度该怎么分配、探索半径该变大还是变小”；
 - 代价是每层都要额外维护一个 `r^2` 维的方差向量，但仍明显轻于 full-CMA。
 
-## 5. 更新规则与 trust region
+## 5. 更新规则
 
 ### 5.1 标准 ES 更新
 
@@ -608,58 +607,6 @@ $$
 $$
 
 在当前实现里只作为诊断量记录，不再参与步长归一化。
-
-### 5.2 每层步长裁剪
-
-设每层单步最大范数为 $\tau_{\text{step}} > 0$，当前配置名为
-
-$$
-\tau_{\text{step}} = \texttt{es.trust\_region.max\_layer\_step\_norm.m}.
-$$
-
-则对每个目标层，执行
-
-$$
-\Delta Z_{t,\ell}
-=
-\begin{cases}
-\Delta Z_{t,\ell}^{\text{raw}}, &
-\|\Delta Z_{t,\ell}^{\text{raw}}\|_F \le \tau_{\text{step}}, \\
-\dfrac{\tau_{\text{step}}}{\|\Delta Z_{t,\ell}^{\text{raw}}\|_F}\,
-\Delta Z_{t,\ell}^{\text{raw}}, &
-\|\Delta Z_{t,\ell}^{\text{raw}}\|_F > \tau_{\text{step}}.
-\end{cases}
-$$
-
-### 5.3 每层状态范数裁剪
-
-为了统一三种参数化，这里把每层 latent state 统一写成 $Z_\ell$。先做加法更新：
-
-$$
-Z_{t+1,\ell}^{\text{preclip}} = Z_{t,\ell} + \Delta Z_{t,\ell}.
-$$
-
-再施加状态上界 $\tau_{\text{state}} > 0$，当前配置名为
-
-$$
-\tau_{\text{state}} = \texttt{es.trust\_region.max\_state\_norm.m}.
-$$
-
-当前代码的实际行为是“对每个 layer 的 `m_state` 分别裁剪”，因此
-
-$$
-Z_{t+1,\ell}
-=
-\begin{cases}
-Z_{t+1,\ell}^{\text{preclip}}, &
-\|Z_{t+1,\ell}^{\text{preclip}}\|_F \le \tau_{\text{state}}, \\
-\dfrac{\tau_{\text{state}}}{\|Z_{t+1,\ell}^{\text{preclip}}\|_F}\,
-Z_{t+1,\ell}^{\text{preclip}}, &
-\|Z_{t+1,\ell}^{\text{preclip}}\|_F > \tau_{\text{state}}.
-\end{cases}
-$$
-
-注意：尽管配置名叫 `max_state_norm`，但当前实现不是对整个拼接后的全局状态做一次总裁剪，而是对每个目标层分别裁剪。
 
 ## 6. 从谱状态到 vLLM LoRA adapter
 
@@ -1028,8 +975,7 @@ $$
 
 - `sigma` 控制扰动半径，也就是每个 mutant 离当前 latent center state 有多远；
 - `alpha` 控制最终写回中心状态时的更新幅度；
-- `num_mutants` 控制每一步用多少个样本来估计方向；
-- trust region 是可选稳定化项，默认关闭；只有显式配置时才会限制单步更新和累计状态。
+- `num_mutants` 控制每一步用多少个样本来估计方向。
 
 需要注意：当谱参数化开启 `subspace.init_method=proportional` 时，`es.sigma.m` 不再直接等于每一维的真实采样标准差，而是一个“全局基准系数”。对 `spectral_diagonal`，第 $i$ 个谱方向的真实初始标准差会变成
 
@@ -1045,8 +991,6 @@ $$
 | `es.update_rule` | 选择 `pairwise_directional`、`gaussian_mean` 或 `per_layer_diagonal_cma_es` | `per_layer_diagonal_cma_es` | 前两者更轻，`per_layer_diagonal_cma_es` 会额外学习每层搜索分布 |
 | `es.sigma.m` | 扰动半径 $\sigma$ | `0.01` | 太小则 reward 差分信号弱，太大则局部线性近似变差 |
 | `es.alpha.m` | 标准 ES 更新中的步长系数 $\alpha$ | `0.005` | 直接控制更新强度；如果 loss/reward 波动很大，通常优先先降它 |
-| `es.trust_region.max_layer_step_norm.m` | 每层单步最大 Frobenius 范数 | 默认关闭 | 显式配置后可防止单次更新把某一层推得过猛 |
-| `es.trust_region.max_state_norm.m` | 每层 latent state 最大 Frobenius 范数 | 默认关闭 | 对 `spectral_dense` 是 `M_l` 的范数上界；对 `spectral_diagonal` 是对角向量的 $\ell_2$ 范数上界；对另外两支则是因子张量的范数上界 |
 
 当 `es.update_rule=per_layer_diagonal_cma_es` 时，`es.alpha.m` 不再决定均值更新，真正起作用的是 `es.sigma.m` 和 `es.cma.*`。这里的每层状态维度会随参数化而变化：
 
@@ -1195,14 +1139,12 @@ $$
 5. `es.num_mutants`
 6. `es.sigma.m`
 7. `es.alpha.m`
-8. `es.trust_region.max_layer_step_norm.m`
-9. `es.trust_region.max_state_norm.m`
-10. `train.effective_question_batch`
-11. `train.micro_batch`
-12. `execution.mutant_chunk_size`
-13. `vllm.max_loras`
-14. `vllm.gpu_memory_utilization`
-15. `generation.max_new_tokens`
+8. `train.effective_question_batch`
+9. `train.micro_batch`
+10. `execution.mutant_chunk_size`
+11. `vllm.max_loras`
+12. `vllm.gpu_memory_utilization`
+13. `generation.max_new_tokens`
 
 其中：
 

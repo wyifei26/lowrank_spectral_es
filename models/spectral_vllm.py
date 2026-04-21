@@ -159,14 +159,12 @@ class SpectralVLLMState:
     def apply_step_payloads(
         self,
         step_payloads: dict[str, dict[str, torch.Tensor]],
-        *,
-        max_state_norm: float | None = None,
     ) -> None:
         for name, adapter in self.adapters.items():
             bundle = step_payloads.get(name)
             if not bundle:
                 continue
-            adapter.apply_step_payload(bundle, max_state_norm=max_state_norm)
+            adapter.apply_step_payload(bundle)
 
     def export_adapter(
         self,

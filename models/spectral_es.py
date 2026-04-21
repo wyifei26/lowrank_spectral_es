@@ -123,23 +123,13 @@ class SpectralAdapterLayer(AdapterLayerBase):
     def state_norm(self) -> float:
         return float(torch.linalg.vector_norm(self.m_state).item())
 
-    def apply_step(self, step_tensor: torch.Tensor, *, max_state_norm: float | None = None) -> None:
+    def apply_step(self, step_tensor: torch.Tensor) -> None:
         self.m_state.add_(step_tensor.to(self.m_state.dtype))
-        if max_state_norm is None or max_state_norm <= 0:
-            return
-        state_norm = self.state_norm()
-        if state_norm > max_state_norm and state_norm > 0:
-            self.m_state.mul_(max_state_norm / state_norm)
 
-    def apply_step_payload(
-        self,
-        step_bundle: dict[str, torch.Tensor],
-        *,
-        max_state_norm: float | None = None,
-    ) -> None:
+    def apply_step_payload(self, step_bundle: dict[str, torch.Tensor]) -> None:
         if "m" not in step_bundle:
             return
-        self.apply_step(step_bundle["m"], max_state_norm=max_state_norm)
+        self.apply_step(step_bundle["m"])
 
     def export_trainable_state(self) -> dict[str, torch.Tensor]:
         return {
@@ -241,23 +231,13 @@ class DiagonalSpectralAdapterLayer(AdapterLayerBase):
     def state_norm(self) -> float:
         return float(torch.linalg.vector_norm(self.m_state).item())
 
-    def apply_step(self, step_tensor: torch.Tensor, *, max_state_norm: float | None = None) -> None:
+    def apply_step(self, step_tensor: torch.Tensor) -> None:
         self.m_state.add_(step_tensor.to(self.m_state.dtype))
-        if max_state_norm is None or max_state_norm <= 0:
-            return
-        state_norm = self.state_norm()
-        if state_norm > max_state_norm and state_norm > 0:
-            self.m_state.mul_(max_state_norm / state_norm)
 
-    def apply_step_payload(
-        self,
-        step_bundle: dict[str, torch.Tensor],
-        *,
-        max_state_norm: float | None = None,
-    ) -> None:
+    def apply_step_payload(self, step_bundle: dict[str, torch.Tensor]) -> None:
         if "m" not in step_bundle:
             return
-        self.apply_step(step_bundle["m"], max_state_norm=max_state_norm)
+        self.apply_step(step_bundle["m"])
 
     def export_trainable_state(self) -> dict[str, torch.Tensor]:
         return {
@@ -367,23 +347,13 @@ class FactorizedSpectralAdapterLayer(AdapterLayerBase):
     def state_norm(self) -> float:
         return float(torch.linalg.vector_norm(self.m_state).item())
 
-    def apply_step(self, step_tensor: torch.Tensor, *, max_state_norm: float | None = None) -> None:
+    def apply_step(self, step_tensor: torch.Tensor) -> None:
         self.m_state.add_(step_tensor.to(self.m_state.dtype))
-        if max_state_norm is None or max_state_norm <= 0:
-            return
-        state_norm = self.state_norm()
-        if state_norm > max_state_norm and state_norm > 0:
-            self.m_state.mul_(max_state_norm / state_norm)
 
-    def apply_step_payload(
-        self,
-        step_bundle: dict[str, torch.Tensor],
-        *,
-        max_state_norm: float | None = None,
-    ) -> None:
+    def apply_step_payload(self, step_bundle: dict[str, torch.Tensor]) -> None:
         if "m" not in step_bundle:
             return
-        self.apply_step(step_bundle["m"], max_state_norm=max_state_norm)
+        self.apply_step(step_bundle["m"])
 
     def export_trainable_state(self) -> dict[str, torch.Tensor]:
         left, right = self._split_state(self.m_state)
@@ -491,23 +461,13 @@ class LoRAESAdapterLayer(AdapterLayerBase):
     def state_norm(self) -> float:
         return float(torch.linalg.vector_norm(self.m_state).item())
 
-    def apply_step(self, step_tensor: torch.Tensor, *, max_state_norm: float | None = None) -> None:
+    def apply_step(self, step_tensor: torch.Tensor) -> None:
         self.m_state.add_(step_tensor.to(self.m_state.dtype))
-        if max_state_norm is None or max_state_norm <= 0:
-            return
-        state_norm = self.state_norm()
-        if state_norm > max_state_norm and state_norm > 0:
-            self.m_state.mul_(max_state_norm / state_norm)
 
-    def apply_step_payload(
-        self,
-        step_bundle: dict[str, torch.Tensor],
-        *,
-        max_state_norm: float | None = None,
-    ) -> None:
+    def apply_step_payload(self, step_bundle: dict[str, torch.Tensor]) -> None:
         if "m" not in step_bundle:
             return
-        self.apply_step(step_bundle["m"], max_state_norm=max_state_norm)
+        self.apply_step(step_bundle["m"])
 
     def export_trainable_state(self) -> dict[str, torch.Tensor]:
         lora_b, lora_a_t = self._split_state(self.m_state)

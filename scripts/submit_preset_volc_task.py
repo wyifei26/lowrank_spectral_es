@@ -17,16 +17,20 @@ from volc_task_presets import (
 
 
 # Edit these seven values before running the script.
-DATASET_KEY = "gsm8k"
-MODEL_KEY = "qwen3_1p7b_base"
+# gsm8k, math_data, mmlu_pro
+DATASET_KEY = "math_data"
+# qwen3_0p6b_base, qwen3_0p6b_nothink, qwen3_0p6b_think, qwen3_1p7b_base, qwen3_1p7b_base_rl, qwen3_8b_base
+MODEL_KEY = "qwen3_8b_base"
+# spectral_dense, spectral_diagonal, lora_es, full_factorized_m
 PARAMETERIZATION_KEY = "spectral_dense"
-INITIALIZATION_KEY = "none"
+# none, proportional
+INITIALIZATION_KEY = "proportional"
 PARAM_KEY = "default"
 SAMPLING_KEY = "cma"
-GPU_COUNT = 2
+GPU_COUNT = 8
 
 # Optional knobs for the generated task.
-WANDB_GROUP = "spectral_es_manual"
+WANDB_GROUP = "math_data"
 
 
 def main() -> None:

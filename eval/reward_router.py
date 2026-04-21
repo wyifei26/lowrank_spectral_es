@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
@@ -20,7 +21,19 @@ def _workspace_root() -> Path:
 
 
 def _default_verifier_path() -> Path:
-    return _workspace_root() / "code" / "verl" / "verifier.py"
+    env_path = os.environ.get("MATH_VERIFIER_PATH")
+    if env_path:
+        return Path(env_path)
+
+    candidates = [
+        _workspace_root() / "code" / "verl" / "verifier.py",
+        _workspace_root() / "verl" / "verifier.py",
+        Path(__file__).resolve().parents[1] / "verl" / "verifier.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _normalize_source_name(source: str | None) -> str:

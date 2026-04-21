@@ -51,8 +51,6 @@ class AdapterLayerBase(nn.Module, ABC):
     def apply_step_payload(
         self,
         step_bundle: dict[str, torch.Tensor],
-        *,
-        max_state_norm: float | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -168,11 +166,9 @@ class MutantModel(nn.Module):
     def apply_step_payloads(
         self,
         step_payloads: dict[str, dict[str, torch.Tensor]],
-        *,
-        max_state_norm: float | None = None,
     ) -> None:
         for name, module in self.mutant_modules.items():
             bundle = step_payloads.get(name)
             if not bundle:
                 continue
-            module.adapter.apply_step_payload(bundle, max_state_norm=max_state_norm)
+            module.adapter.apply_step_payload(bundle)

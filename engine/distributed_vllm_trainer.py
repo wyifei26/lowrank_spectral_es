@@ -33,7 +33,6 @@ from es.spectral_update import (
     compute_gaussian_direction_payloads,
     compute_pairwise_direction_payloads,
 )
-from es.updater import resolve_named_value
 from eval.health import summarize_single_mutant_result
 from eval.val_runner import write_json, write_jsonl
 from models.base_loader import load_causal_lm, load_tokenizer, resolve_dtype
@@ -877,7 +876,6 @@ class DistributedVLLMSpectralESTrainer:
                     noise_payloads=noise_payloads,
                     rewards=global_rewards,
                 )
-                trust_region = self.config.get("es", {}).get("trust_region", {})
                 step_payloads, step_stats = apply_alpha_update_to_direction_payloads(
                     direction_payloads=direction_payloads,
                     alpha_config=self.config["es"].get(
@@ -885,26 +883,17 @@ class DistributedVLLMSpectralESTrainer:
                         self.config["es"].get("learning_rate", self.config["es"].get("step_size", {"m": 0.005})),
                     ),
                     sigma_config=self.config["es"]["sigma"],
-                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
                 )
             elif update_rule in CMA_UPDATE_RULES:
                 if self.cma_state is None:
                     raise RuntimeError(f"{update_rule} requires CMA state to be initialized")
-                trust_region = self.config.get("es", {}).get("trust_region", {})
-                max_state_norm = None
-                if "max_state_norm" in trust_region:
-                    max_state_norm = resolve_named_value(trust_region["max_state_norm"], "m")
                 step_payloads, direction_stats, step_stats = self.cma_state.apply_update(
                     rewards=global_rewards,
                     noise_payloads=noise_payloads,
-                    current_states={name: adapter.m_state.detach().cpu().clone() for name, adapter in self.state.adapters.items()},
-                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
-                    max_state_norm=max_state_norm,
                 )
             else:
                 raise ValueError(f"unsupported es.update_rule: {update_rule}")
             if update_rule == "pairwise_directional":
-                trust_region = self.config.get("es", {}).get("trust_region", {})
                 step_payloads, step_stats = apply_alpha_update_to_direction_payloads(
                     direction_payloads=direction_payloads,
                     alpha_config=self.config["es"].get(
@@ -912,7 +901,6 @@ class DistributedVLLMSpectralESTrainer:
                         self.config["es"].get("learning_rate", self.config["es"].get("step_size", {"m": 0.005})),
                     ),
                     sigma_config=self.config["es"]["sigma"],
-                    max_layer_step_config=trust_region.get("max_layer_step_norm"),
                 )
         else:
             global_rewards = None
@@ -922,11 +910,7 @@ class DistributedVLLMSpectralESTrainer:
             step_payloads = None
 
         step_payloads = self._broadcast_object(step_payloads)
-        trust_region = self.config.get("es", {}).get("trust_region", {})
-        max_state_norm = None
-        if "max_state_norm" in trust_region:
-            max_state_norm = resolve_named_value(trust_region["max_state_norm"], "m")
-        self.state.apply_step_payloads(step_payloads, max_state_norm=max_state_norm)
+        self.state.apply_step_payloads(step_payloads)
         self.state.activate_current_state()
 
         if not self.is_main_process or global_rewards is None:

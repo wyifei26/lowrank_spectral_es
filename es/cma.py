@@ -156,10 +156,6 @@ class PerLayerCMAES:
         *,
         rewards: torch.Tensor,
         noise_payloads: dict[str, dict[str, torch.Tensor]],
-        current_states: dict[str, torch.Tensor],
-        max_layer_step_config: Any | None = None,
-        max_state_norm: float | None = None,
-        eps: float = 1e-8,
     ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, float], dict[str, float]]:
         rewards = rewards.float()
         population_size = rewards.numel()
@@ -179,16 +175,9 @@ class PerLayerCMAES:
         step_norms: list[float] = []
         raw_step_norms: list[float] = []
         hsigma_flags: list[float] = []
-        layers_clipped = 0.0
         selected_reward_mean = float(rewards[top_indices].mean().item())
         selected_reward_std = float(rewards[top_indices].std(unbiased=False).item()) if mu > 1 else 0.0
         reward_best = float(rewards[top_indices[0]].item())
-
-        max_layer_step_norm = None
-        if max_layer_step_config is not None:
-            max_layer_step_norm = resolve_named_value(max_layer_step_config, "m")
-            if max_layer_step_norm <= 0.0:
-                max_layer_step_norm = None
 
         for name, shape in self.layer_shapes.items():
             layer = self.layers[name]
@@ -203,19 +192,7 @@ class PerLayerCMAES:
             raw_step_norm = float(torch.linalg.vector_norm(raw_step_flat).item())
             raw_step_norms.append(raw_step_norm)
 
-            step_flat = raw_step_flat.clone()
-            if max_layer_step_norm is not None and raw_step_norm > max_layer_step_norm and raw_step_norm > eps:
-                step_flat.mul_(max_layer_step_norm / raw_step_norm)
-                layers_clipped += 1.0
-
-            current_flat = current_states[name].reshape(dim).to(device=self.device, dtype=self.dtype)
-            next_flat = current_flat + step_flat
-            if max_state_norm is not None and max_state_norm > 0.0:
-                next_norm = float(torch.linalg.vector_norm(next_flat).item())
-                if next_norm > max_state_norm and next_norm > eps:
-                    next_flat.mul_(max_state_norm / next_norm)
-                    step_flat = next_flat - current_flat
-
+            step_flat = raw_step_flat
             step_norm = float(torch.linalg.vector_norm(step_flat).item())
             step_norms.append(step_norm)
             step_payloads[name] = {"m": step_flat.reshape(shape).cpu()}
@@ -267,7 +244,6 @@ class PerLayerCMAES:
             "raw_step_global_norm": payload_global_norm(raw_step_payloads),
             "step_global_norm": payload_global_norm(step_payloads),
             "step_layer_max_norm": payload_max_norm(step_payloads),
-            "step_layers_clipped": layers_clipped,
             "cma_raw_step_norm_mean": sum(raw_step_norms) / max(len(raw_step_norms), 1),
             "cma_step_norm_mean": sum(step_norms) / max(len(step_norms), 1),
         }

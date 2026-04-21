@@ -71,14 +71,12 @@ class ParamPreset:
     reward_exact_match: float = 1.0
     split_seed: int = 42
     seed: int = 42
-    trust_region_max_layer_step_norm_m: float = 0.0
-    trust_region_max_state_norm_m: float = 0.0
     cma_selection_ratio: float = 0.5
     cma_mean_step_scale: float = 1.0
     cma_min_sigma: float = 1.0e-6
     cma_max_sigma: float = 0.02
     cma_min_eigenvalue: float = 1.0e-8
-    wandb_project: str = "lowrank-spectral-es-rl"
+    wandb_project: str = "lowrank-spectral-es-math-data"
     notes_tag: str | None = None
     wandb_mode: str = "online"
     wandb_enabled: bool = True
@@ -269,10 +267,10 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     ),
     "qwen3_1p7b_base_rl": ModelPreset(
         key="qwen3_1p7b_base_rl",
-        model_path="/GenSIvePFS/users/yfwang/code/verl/trajectories/verl_checkpoints/rl_recipe_qwen3_1p7b_base_gsm8k_4gpu_maxtok4096_temp0p6_topp0p9_e3_norsm_qwen3_1p7b_base_hf/global_step_65/actor/huggingface",
+        model_path="/sia-thu/wangyifei/verl_trajectory/verl_checkpoints/rl_recipe_qwen3_1p7b_base_gsm8k_4gpu_maxtok4096_temp0p6_topp0p9_e3_norsm_qwen3_1p7b_base_hf/global_step_85/actor/huggingface",
         thinking=False,
         num_mutants=64,
-        effective_question_batch=128,
+        effective_question_batch=16,
         eval_micro_batch=512,
         max_cpu_loras=64,
     ),
@@ -281,7 +279,7 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
         model_path="/GenSIvePFS/users/model/Qwen/Qwen3-8B-Base",
         thinking=True,
         num_mutants=64,
-        effective_question_batch=64,
+        effective_question_batch=16,
         eval_micro_batch=256,
         max_cpu_loras=64,
     ),
@@ -332,14 +330,14 @@ PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
         key="spectral_diagonal",
         parameterization="spectral_diagonal",
         sigma_m=0.02,
-        subspace_rank=32,
+        subspace_rank=1024,
         label="Spectral diagonal M",
         summary="truncated spectral basis with perturbations only on the singular-value diagonal",
     ),
     "lora_es": ParameterizationPreset(
         key="lora_es",
         parameterization="lora_es",
-        sigma_m=0.004,
+        sigma_m=0.02,
         factor_rank=8,
         label="LoRA-ES",
         summary="direct low-rank LoRA perturbation in weight space",
@@ -347,7 +345,7 @@ PARAMETERIZATION_PRESETS: dict[str, ParameterizationPreset] = {
     "full_factorized_m": ParameterizationPreset(
         key="full_factorized_m",
         parameterization="full_factorized_m",
-        sigma_m=0.005,
+        sigma_m=0.02,
         factor_rank=8,
         label="Full-basis factorized M",
         summary="full spectral basis with factorized in-basis matrix M = P Q^T",
@@ -366,7 +364,7 @@ INITIALIZATION_PRESETS: dict[str, InitializationPreset] = {
     "proportional": InitializationPreset(
         key="proportional",
         init_method="proportional",
-        init_rho=0.1,
+        init_rho=1,
         label="proportional singular-value init",
         summary="initial latent noise scale proportional to cached singular values",
     ),
@@ -458,19 +456,17 @@ def build_run_suffix(config: ResolvedTaskConfig, timestamp: str) -> str:
     sampling_tag = config.sampling.key.replace("_default", "")
     suffix_parts = [
         timestamp,
-        dataset_tag,
-        sampling_tag,
-        blocks_tag,
-        "allmodules",
         config.parameterization.key,
+        dataset_tag,
         f"k{config.model.num_mutants}",
         f"q{config.model.effective_question_batch}",
         f"mb{config.train_micro_batch}",
         f"chunk{config.mutant_chunk_size}",
-        f"{config.gpu_count}gpu",
         f"sigma{str(config.parameterization.sigma_m).replace('.', 'p')}",
+        sampling_tag,
         model_tag,
         thinking_tag,
+        f"{config.gpu_count}gpu",
     ]
     basis_tag = basis_rank_tag(config.parameterization)
     if basis_tag:
@@ -514,8 +510,6 @@ def build_overrides(config: ResolvedTaskConfig, run_id: str) -> list[str]:
         f"es.cma.min_sigma={config.params.cma_min_sigma}",
         f"es.cma.max_sigma={config.params.cma_max_sigma}",
         f"es.cma.min_eigenvalue={config.params.cma_min_eigenvalue}",
-        f"es.trust_region.max_layer_step_norm.m={config.params.trust_region_max_layer_step_norm_m}",
-        f"es.trust_region.max_state_norm.m={config.params.trust_region_max_state_norm_m}",
         f"reward.exact_match={config.params.reward_exact_match}",
         f"train.train_steps={config.params.train_steps}",
         f"train.effective_question_batch={config.model.effective_question_batch}",
@@ -661,6 +655,12 @@ def build_payload(config: ResolvedTaskConfig, *, task_name: str, run_id: str, de
         "EnableTensorBoard": False,
         "Storages": [
             {
+                "Type": "TosFuse",
+                "MountPath": "/sia-thu",
+                "Bucket": "sia-thu",
+                "Prefix": "/",
+            },
+            {
                 "Type": "Vepfs",
                 "MountPath": "/GenSIvePFS/users/model",
                 "SubPath": "users/model",
@@ -678,7 +678,7 @@ def build_task_artifacts(selection: TaskSelection, *, timestamp: str | None = No
     resolved = resolve_task_selection(selection)
     ts = timestamp or timestamp_now()
     run_id = build_run_suffix(resolved, ts)
-    task_name = f"lowrank-spectral-es-{run_id}"
+    task_name = f"{run_id}"
     config_dir = VOLC_CONFIG_ROOT / resolved.dataset.task_config_subdir
     config_path = config_dir / f"{run_id}.yaml"
     payload = build_payload(resolved, task_name=task_name, run_id=run_id, description=build_description(resolved))
