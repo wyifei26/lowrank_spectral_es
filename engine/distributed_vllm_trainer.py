@@ -462,6 +462,72 @@ class DistributedVLLMSpectralESTrainer:
         return "valid" if split == "val" else split
 
     @staticmethod
+    def _to_train_wandb_metrics(payload: dict[str, Any]) -> dict[str, float]:
+        reward_keys = {
+            "reward_mean",
+            "reward_std",
+            "accuracy_mean",
+            "reward_abs_mean",
+            "reward_nonzero_rate",
+            "cma_selected_reward_mean",
+            "cma_selected_reward_std",
+            "cma_reward_best",
+        }
+        analysis_keys = {
+            "current_k",
+            "current_micro_batch",
+            "adapter_norm_sum",
+            "update_accepted",
+            "step_scale",
+            "direction_global_norm",
+            "alpha",
+            "sigma",
+            "alpha_over_sigma",
+            "raw_step_global_norm",
+            "step_global_norm",
+            "step_layer_max_norm",
+            "cma_sigma_mean",
+            "cma_sigma_min",
+            "cma_sigma_max",
+            "cma_cov_trace_mean",
+            "cma_hsigma_rate",
+            "cma_raw_step_norm_mean",
+            "cma_step_norm_mean",
+        }
+        efficiency_keys = {
+            "world_size",
+            "mutants_per_worker",
+            "elapsed_seconds",
+            "step_wall_time_seconds",
+            "generated_tokens_total",
+            "requests_total",
+            "mutant_evals_total",
+            "tokens_per_sec",
+            "requests_per_sec",
+            "mutants_per_sec",
+            "gpu_monitor_samples",
+            "gpu_util_mean",
+            "gpu_util_max",
+            "mem_util_mean",
+            "mem_util_max",
+            "mem_used_gb_mean",
+            "mem_used_gb_max",
+            "peak_memory_gb",
+        }
+        groups = {
+            "reward": reward_keys,
+            "analysis": analysis_keys,
+            "efficiency": efficiency_keys,
+        }
+        metrics: dict[str, float] = {}
+        for group_name, keys in groups.items():
+            for key in sorted(keys):
+                value = payload.get(key)
+                if isinstance(value, (int, float)):
+                    metrics[f"train/{group_name}/{key}"] = float(value)
+        return metrics
+
+    @staticmethod
     def _merge_benchmark_metrics(gathered_payloads: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
         merged: dict[str, dict[str, float]] = {}
         for item in gathered_payloads:
@@ -485,7 +551,7 @@ class DistributedVLLMSpectralESTrainer:
 
     def _to_wandb_metrics(self, tag: str, payload: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any]]:
         if tag == "TRAIN_STEP":
-            metrics = {f"train/{key}": value for key, value in payload.items() if isinstance(value, (int, float))}
+            metrics = self._to_train_wandb_metrics(payload)
             metrics["trainer/global_step"] = float(payload["step"])
             return metrics, {"trainer/tag": tag}
         if tag in {"VAL_ACCURACY", "EVAL_DONE"}:
@@ -493,35 +559,25 @@ class DistributedVLLMSpectralESTrainer:
             split_key = self._wandb_split_name(str(split))
             metrics = {
                 f"{split_key}/accuracy": float(payload["accuracy"]),
-                f"{split_key}/num_examples": float(payload["num_examples"]),
                 f"{split_key}/reward_mean": float(payload.get("reward_mean", 0.0)),
                 "trainer/global_step": float(payload["step"]),
             }
-            for benchmark_name, stats in payload.get("benchmark_metrics", {}).items():
-                metrics[f"{split_key}/{benchmark_name}/accuracy"] = float(stats["accuracy"])
-                metrics[f"{split_key}/{benchmark_name}/num_examples"] = float(stats["num_examples"])
-                metrics[f"{split_key}/{benchmark_name}/reward_mean"] = float(stats["reward_mean"])
+            if split_key != "test":
+                metrics[f"{split_key}/num_examples"] = float(payload["num_examples"])
             return metrics, {"trainer/tag": tag, "trainer/split": split}
         if tag == "BASELINE_DONE":
             split = payload.get("split", "baseline")
             split_key = self._wandb_split_name(str(split))
             metrics = {
                 f"baseline/{split_key}/accuracy": float(payload["accuracy"]),
-                f"baseline/{split_key}/num_examples": float(payload.get("num_examples", 0.0)),
                 f"baseline/{split_key}/reward_mean": float(payload.get("reward_mean", 0.0)),
                 "trainer/global_step": float(payload.get("step", 0.0)),
             }
-            for benchmark_name, stats in payload.get("benchmark_metrics", {}).items():
-                metrics[f"baseline/{split_key}/{benchmark_name}/accuracy"] = float(stats["accuracy"])
-                metrics[f"baseline/{split_key}/{benchmark_name}/num_examples"] = float(stats["num_examples"])
-                metrics[f"baseline/{split_key}/{benchmark_name}/reward_mean"] = float(stats["reward_mean"])
+            if split_key != "test":
+                metrics[f"baseline/{split_key}/num_examples"] = float(payload.get("num_examples", 0.0))
             return metrics, {"trainer/tag": tag}
         if tag == "DATA_READY":
-            metrics = {
-                **{f"data/{key}": float(value) for key, value in payload.items() if isinstance(value, (int, float))},
-                "trainer/global_step": 0.0,
-            }
-            return metrics, {"trainer/tag": tag}
+            return {}, {"trainer/tag": tag}
         if tag == "CHECKPOINT_SAVED":
             metrics = {
                 "checkpoint/step": float(payload["step"]),
